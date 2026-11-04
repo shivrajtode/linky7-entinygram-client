@@ -1,0 +1,108 @@
+#!/usr/bin/env python3
+"""Prepare EntinyGram sources for the Linky7 native (non-plugin) build."""
+from __future__ import annotations
+import argparse
+import shutil
+from pathlib import Path
+
+BLOCKED = {
+    # Do not ship features that defeat recipient privacy/content protections.
+    "entiny/privacy/ghost-mode.patch",
+    "entiny/privacy/content-protection-bypass.patch",
+    "entiny/privacy/save-self-destruct.patch",
+    "entiny/media/save-stories.patch",
+    "entiny/restrictions/gif-restriction-bypass.patch",
+    "entiny/privacy/allow-screenshots.patch",
+    "entiny/privacy/suppress-screenshot-notification.patch",
+    "entiny/privacy/contact-changes.patch",
+    "entiny/privacy/device-spoof.patch",
+    "entiny/privacy/last-seen.patch",
+    "entiny/media/one-time-peek.patch",
+    "feature/show-deleted-replies.patch",
+    "entiny/chat/reaction-read-sync.patch",
+    "entiny/chat/instant-mark-reactions-read.patch",
+    # This build uses only Linky7's independent OpenAI AI screens, not Gemini hooks.
+    "entiny/ai/ai-compose.patch",
+    "entiny/ai/chat-ai-deeplink.patch",
+    "entiny/ai/ai-summary-inline.patch",
+    "entiny/translator/translator.patch",
+    "entiny/translator/input-translate.patch",
+    # Avoid locally unlocking Telegram-paid/restricted limits.
+    "entiny/premium/local-premium.patch",
+    "entiny/restrictions/unlimited-fav-stickers.patch",
+    "entiny/restrictions/unlimited-pinned-chats.patch",
+    "entiny/restrictions/unlimited-folder-chats.patch",
+    # Keep GPU-heavy blur/glass and unusually large image-cache additions off low-RAM devices.
+    "entiny/ui/popup-swipeback-live-blur.patch",
+    "entiny/ui/liquid-glass-controls.patch",
+    "entiny/ui/liquid-glass-live-update.patch",
+    "bugfix/image-cache-large-heap.patch",
+}
+
+
+BLOCK_TOKENS = (
+    "ghost-mode", "ghost_mode", "stealth", "read-receipt", "read-suppression",
+    "reaction-read", "hide-seen", "presence-spoof", "online-spoof", "typing-spoof",
+    "device-spoof", "anti-deletion", "saved-deleted", "deleted-message", "deleted-messages",
+    "edit-archive", "self-destruct", "view-once", "expiring-media", "save-stories",
+    "story-download", "content-protection", "protected-forward", "forward-restriction",
+    "screenshot-notification", "allow-screenshot", "screenshot-bypass", "skip-login",
+    "login-countdown", "countdown-skip", "local-premium", "premium-unlock",
+    "unlimited-pinned", "unlimited-fav", "unlimited-folder", "unlimited-stickers",
+    "entiny/ai/", "translator", "input-translate", "liquid-glass",
+    "popup-swipeback-live-blur", "image-cache-large-heap",
+)
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--repo", required=True, type=Path, help="EntinyGram checkout directory")
+    parser.add_argument("--builder", required=True, type=Path, help="Linky7 builder root")
+    args = parser.parse_args()
+    repo = args.repo.resolve()
+    builder = args.builder.resolve()
+
+    series = repo / "series"
+    if not series.is_file():
+        raise SystemExit(f"[ERROR] EntinyGram series file not found: {series}")
+    lines = series.read_text(encoding="utf-8").splitlines()
+    def is_blocked(line: str) -> bool:
+        value = line.strip().lower().replace("\\", "/")
+        if not value or value.startswith("#"):
+            return False
+        return value in BLOCKED or any(token in value for token in BLOCK_TOKENS)
+
+    blocked_present = {line.strip() for line in lines if is_blocked(line)}
+    kept = [line for line in lines if not is_blocked(line)]
+    if len(kept) < 300:
+        raise SystemExit(f"[ERROR] Unexpectedly short patch series after privacy filter ({len(kept)} entries); refusing to continue.")
+    (repo / "series.linky7-original").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    series.write_text("\n".join(kept) + "\n", encoding="utf-8")
+
+    src = builder / "overlay" / "src" / "fork-app" / "linky7"
+    if not src.is_dir() or not (src / "Linky7StudioActivity.kt").is_file():
+        raise SystemExit("[ERROR] Native Linky7 Kotlin Activity is missing from builder overlay.")
+    dest = repo / "src" / "fork-app" / "linky7"
+    dest.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src / "Linky7StudioActivity.kt", dest / "Linky7StudioActivity.kt")
+
+    # Retain upstream files and all original source/license notices. This only edits the
+    # active series file in the build checkout; the skipped patch files remain untouched.
+    (repo / "LINKY7_BUILD_NOTES.md").write_text(
+        "# Linky7 build notes\n\n"
+        "This checkout builds a native Linky7 Studio Activity inside the EntinyGram Telegram Android client.\n"
+        "The active patch series excludes privacy/content-protection bypasses, self-destruct/story saving,\n"
+        "read-receipt/ghost-mode changes, login-countdown bypasses, local premium/restriction unlocks,\n"
+        "EntinyGram Gemini AI/translator patches,\n"
+        "and high-cost live blur/glass or large-image-cache patches intended to reduce GPU/RAM pressure on low-memory devices.\n"
+        "All upstream patch files, original licences, and acknowledgements are retained in the checkout.\n",
+        encoding="utf-8",
+    )
+    print(f"[OK] EntinyGram source prepared: {len(kept)} upstream patches kept; {len(blocked_present)} privacy/AI/restriction/performance patches excluded.")
+    for entry in sorted(blocked_present):
+        print(f"  [SKIP] {entry}")
+    print("[OK] Native Linky7 Kotlin Activity placed into src/fork-app/linky7 (no plugin bridge).")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

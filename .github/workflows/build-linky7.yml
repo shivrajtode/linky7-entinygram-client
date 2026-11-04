@@ -1,0 +1,115 @@
+name: Build Linky7 Telegram Client
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linky7-apk-build
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Native Android APK (ARM64)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 100
+    env:
+      LINKY7_TG_API_ID: ${{ secrets.LINKY7_TG_API_ID }}
+      LINKY7_TG_API_HASH: ${{ secrets.LINKY7_TG_API_HASH }}
+      ABI_FILTERS: arm64-v8a
+      CMAKE_BUILD_PARALLEL_LEVEL: 1
+
+    steps:
+      - name: Checkout Linky7 builder and native Kotlin sources
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Set up Android SDK, NDK and CMake
+        uses: android-actions/setup-android@v3
+        with:
+          packages: |
+            platform-tools
+            platforms;android-36
+            build-tools;36.0.0
+            ndk;27.2.12479018
+            cmake;3.22.1
+
+      - name: Validate user-owned Telegram API credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$LINKY7_TG_API_ID" =~ ^[1-9][0-9]{5,11}$ ]] || { echo 'LINKY7_TG_API_ID secret is missing or invalid.'; exit 1; }
+          [[ "$LINKY7_TG_API_HASH" =~ ^[0-9a-fA-F]{32}$ ]] || { echo 'LINKY7_TG_API_HASH secret is missing or invalid.'; exit 1; }
+          echo 'Telegram API credentials are present (hash withheld).'
+
+      - name: Fetch EntinyGram source and prepare Linky7 native integration
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch v13.1.1-202611020 https://github.com/entaytion/entinyGram.git entinyGram
+          python3 scripts/prepare_source.py --repo entinyGram --builder "$GITHUB_WORKSPACE"
+          cd entinyGram
+          bun install --ignore-scripts
+          # CI mode uses a shallow pinned Telegram checkout and git-apply, no StGit runtime needed.
+          # Pluginless keeps the full Telegram client while omitting the separate JS plugin engine.
+          # Use EntinyGram's documented setup command. It prepares both worktree
+          # and worktree-pluginless; pluginless is the intended native client target.
+          bun run setup
+          cd "$GITHUB_WORKSPACE"
+          python3 scripts/apply_native.py \
+            --repo entinyGram \
+            --builder "$GITHUB_WORKSPACE" \
+            --api-id "$LINKY7_TG_API_ID" \
+            --api-hash "$LINKY7_TG_API_HASH"
+
+      - name: Build Linky7 debug APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd entinyGram/worktree-pluginless
+          printf '\n# Linky7 CI build settings\norg.gradle.jvmargs=-Xmx3g -XX:MaxMetaspaceSize=1024m -Dfile.encoding=UTF-8\norg.gradle.workers.max=1\norg.gradle.parallel=false\nkotlin.compiler.execution.strategy=in-process\n' >> gradle.properties
+          # EntinyGram's documented pluginless task is assembleDebug (not AfatDebug).
+          ./gradlew TMessagesProj_App:assembleDebug \
+            --no-daemon \
+            --max-workers=1 \
+            --stacktrace \
+            -Dorg.gradle.jvmargs='-Xmx3g -XX:MaxMetaspaceSize=1024m -Dfile.encoding=UTF-8' \
+            -Pkotlin.compiler.execution.strategy=in-process
+          mkdir -p "$GITHUB_WORKSPACE/output"
+          APK="$(find TMessagesProj_App/build/outputs/apk -type f -name '*.apk' -path '*/debug/*' -print -quit)"
+          [[ -n "$APK" && -s "$APK" ]] || { echo 'No debug APK was produced in TMessagesProj_App/build/outputs/apk.'; exit 1; }
+          cp "$APK" "$GITHUB_WORKSPACE/output/Linky7.apk"
+          sha256sum "$GITHUB_WORKSPACE/output/Linky7.apk" > "$GITHUB_WORKSPACE/output/SHA256SUMS.txt"
+          printf 'EntinyGram Telegram base commit: %s\n' "$(cat ../upstream-commit 2>/dev/null || echo unknown)" > "$GITHUB_WORKSPACE/output/BUILD-INFO.txt"
+
+      - name: Upload Linky7 APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Linky7-client-apk
+          path: output/*
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload diagnostic logs if build fails
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Linky7-build-diagnostics
+          path: |
+            entinyGram/worktree-pluginless/build/reports/**
+            entinyGram/worktree-pluginless/TMessagesProj*/build/outputs/logs/**
+            entinyGram/worktree-pluginless/.gradle/**/daemon-*.out.log
+          if-no-files-found: ignore
+          retention-days: 7
