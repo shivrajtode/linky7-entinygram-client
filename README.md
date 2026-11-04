@@ -37,7 +37,7 @@ The target archive is protected; old builder ZIPs are deleted only after the new
 
 ```bash
 cd ~/storage/downloads || exit 1
-ZIP="Linky7-EntinyGram-Termux-Builder-v1.1.zip"
+ZIP="Linky7-EntinyGram-Termux-Builder-v1.2.zip"
 [ -s "$ZIP" ] || { echo "Download $ZIP first"; exit 1; }
 unzip -tq "$ZIP" || exit 1
 find . -maxdepth 1 -type f \
@@ -85,7 +85,7 @@ This is an EntinyGram-based full Telegram client build in pluginless mode. It in
 
 - APK: `~/storage/downloads/Linky7.apk`
 - GitHub source/build repository: `https://github.com/<active-account>/linky7-entinygram-client`
-- Build runs and logs: repository → Actions → **Build Linky7 Telegram Client** (ARM64 `assembleAfatDebug` variant).
+- Build runs and logs: repository → Actions → **Build Linky7 Telegram Client** (ARM64 `assembleDebug` task).
 - If a run fails, share its public Actions run URL or only the failed task/error tail. Never paste your OpenAI API key, bot token, Telegram API hash, or GitHub token.
 
-v1.1 uses EntinyGram’s documented `bun run setup` and pluginless `TMessagesProj_App:assembleDebug` task. It also copies the native Kotlin Activity directly into the pluginless app module before compilation. This ZIP has shell/Python syntax and static structure checks only. A complete Android APK build can be confirmed only by the GitHub Actions run on the actual upstream source and Android toolchain.
+v1.2 updates the GitHub Actions runners to Node 24-compatible action releases, separates Android command-line tools setup from the pinned SDK/NDK/CMake package install, retries transient SDK package downloads, and prints the failed-step log tail in Termux. It retains EntinyGram’s documented `bun run setup` and pluginless `TMessagesProj_App:assembleDebug` task. It also copies the native Kotlin Activity directly into the pluginless app module before compilation. This ZIP has shell/Python syntax and static structure checks only. A complete Android APK build can be confirmed only by the GitHub Actions run on the actual upstream source and Android toolchain.

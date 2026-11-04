@@ -116,7 +116,10 @@ info "GitHub Actions run: https://github.com/$REPO/actions/runs/$RUN_ID"
 if ! gh run watch "$RUN_ID" --repo "$REPO" --exit-status; then
   echo
   gh run view "$RUN_ID" --repo "$REPO" --json url,conclusion --jq '"Build conclusion: \(.conclusion)\nRun: \(.url)"' 2>/dev/null || true
-  fail "Cloud build failed. Open the run URL above and share the final error section; do not upload API secrets."
+  echo
+  echo "[LINKY7] Last failed-step log lines (GitHub masks configured secrets):"
+  gh run view "$RUN_ID" --repo "$REPO" --log-failed 2>&1 | tail -n 120 || true
+  fail "Cloud build failed. The error tail is printed above; do not share API hashes, bot tokens, or GitHub tokens."
 fi
 
 DOWNLOAD_DIR="$HOME/storage/downloads"
