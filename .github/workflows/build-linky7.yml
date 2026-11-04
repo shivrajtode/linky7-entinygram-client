@@ -85,6 +85,19 @@ jobs:
           [[ "$LINKY7_TG_API_HASH" =~ ^[0-9a-fA-F]{32}$ ]] || { echo 'LINKY7_TG_API_HASH secret is missing or invalid.'; exit 1; }
           echo 'Telegram API credentials are present (hash withheld).'
 
+      - name: Install StGit 2.7.0 required by EntinyGram
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fL --retry 3 --retry-delay 2 \
+            "https://github.com/stacked-git/stgit/releases/download/v2.7.0/stgit_2.7.0_amd64.deb" \
+            -o "$RUNNER_TEMP/stgit.deb"
+          sudo apt-get update
+          sudo apt-get install -y "$RUNNER_TEMP/stgit.deb"
+          git config --global user.name "Linky7 CI"
+          git config --global user.email "linky7-ci@users.noreply.github.com"
+          command -v stg
+          stg --version
       - name: Fetch EntinyGram source and prepare Linky7 native integration
         shell: bash
         run: |
