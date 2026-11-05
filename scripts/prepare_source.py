@@ -269,6 +269,979 @@ def adapt_premium_badge_patch(repo: Path) -> None:
         return
     raise SystemExit("[ERROR] Premium badge patch is in an unknown state; refusing to guess.")
 
+
+def adapt_archive_media_patch(repo: Path) -> None:
+    """Route missing document/photo stock paths through the archive restore helper."""
+    import re
+
+    patch = repo / "patches" / "entiny" / "media" / "restore-archived-media.patch"
+    if not patch.is_file():
+        raise SystemExit("[ERROR] Archived-media patch is missing.")
+
+    original = patch.read_text(encoding="utf-8")
+    document_path = (
+        "getPathToAttach(MessageObject.getMedia(message).document, null, "
+        "forceCache || MessageObject.getMedia(message).ttl_seconds != 0, useFileDatabaseQueue)"
+    )
+    photo_path = (
+        "getPathToAttach(sizeFull, null, "
+        "forceCache || MessageObject.getMedia(message).ttl_seconds != 0, useFileDatabaseQueue)"
+    )
+    document_stock = f"File stock = {document_path};"
+    photo_stock = f"File stock = {photo_path};"
+    restore = (
+        "return stock.exists() ? stock : "
+        "desu.inugram.helpers.archive.ArchiveMediaHelper.restoreArchived(currentAccount, message, stock);"
+    )
+
+    prefix = original.split("\n---\n", 1)[0].rstrip("\r\n") if "\n---\n" in original else ""
+    if not prefix.startswith("From ") or "Subject: preserve and restore archived media" not in prefix:
+        raise SystemExit("[ERROR] Archived-media patch header changed; refusing to rewrite it.")
+
+    adapted = (
+        prefix + "\n\n---\n"
+        " .../src/main/java/org/telegram/messenger/FileLoader.java | 6 ++++--\n"
+        " 1 file changed, 4 insertions(+), 2 deletions(-)\n"
+        "\n"
+        "diff --git a/TMessagesProj/src/main/java/org/telegram/messenger/FileLoader.java "
+        "b/TMessagesProj/src/main/java/org/telegram/messenger/FileLoader.java\n"
+        "index 0000000..0000000 100644\n"
+        "--- a/TMessagesProj/src/main/java/org/telegram/messenger/FileLoader.java\n"
+        "+++ b/TMessagesProj/src/main/java/org/telegram/messenger/FileLoader.java\n"
+        "@@ -1299,3 +1299,4 @@ public class FileLoader extends BaseController {\n"
+        "             if (MessageObject.getMedia(message) instanceof TLRPC.TL_messageMediaDocument) {\n"
+        f"-                return {document_path};\n"
+        f"+                {document_stock}\n"
+        f"+                {restore}\n"
+        "             } else if (MessageObject.getMedia(message) instanceof TLRPC.TL_messageMediaPhoto) {\n"
+        "@@ -1304,4 +1305,5 @@ public class FileLoader extends BaseController {\n"
+        "                     TLRPC.PhotoSize sizeFull = getClosestPhotoSizeWithSize(sizes, AndroidUtilities.getPhotoSize(true), false, null, true);\n"
+        "                     if (sizeFull != null) {\n"
+        f"-                        return {photo_path};\n"
+        f"+                        {photo_stock}\n"
+        f"+                        {restore}\n"
+        "                     }\n"
+    )
+
+    lines = adapted.splitlines()
+    for addition in (document_stock, photo_stock):
+        if sum(line.startswith("+") and addition in line for line in lines) != 1:
+            raise SystemExit("[ERROR] Archived-media stock path calculation is missing or duplicated.")
+    if sum(line.startswith("+") and restore in line for line in lines) != 2:
+        raise SystemExit("[ERROR] Archived-media restoration is not present in both media branches.")
+    if "res.exists()" in adapted or "restoreArchived(currentAccount, message, res)" in adapted:
+        raise SystemExit("[ERROR] Legacy archived-media patch logic remains.")
+
+    hunk_headers = [i for i, line in enumerate(lines) if line.startswith("@@ -")]
+    if len(hunk_headers) != 2:
+        raise SystemExit("[ERROR] Unexpected archived-media hunk count.")
+    for index, hunk_start in enumerate(hunk_headers):
+        match = re.match(r"^@@ -(\d+),(\d+) \+(\d+),(\d+) @@", lines[hunk_start])
+        if not match:
+            raise SystemExit("[ERROR] Invalid archived-media hunk header.")
+        hunk_end = hunk_headers[index + 1] if index + 1 < len(hunk_headers) else len(lines)
+        body = lines[hunk_start + 1:hunk_end]
+        old_count = sum(line.startswith((" ", "-")) for line in body)
+        new_count = sum(line.startswith((" ", "+")) for line in body)
+        if old_count != int(match.group(2)) or new_count != int(match.group(4)):
+            raise SystemExit("[ERROR] Archived-media hunk lengths do not match their headers.")
+
+    already_adapted = (
+        original.count(document_stock) == 1
+        and original.count(photo_stock) == 1
+        and original.count(restore) == 2
+        and "restoreArchived(currentAccount, message, res)" not in original
+    )
+    if original == adapted:
+        print("[OK] Archived-media patch already adapted; document and photo restoration remain enabled.")
+    elif already_adapted:
+        patch.write_text(adapted, encoding="utf-8")
+        print("[OK] Archived-media patch formatting normalized; both media branches remain enabled.")
+    else:
+        legacy_restore = "desu.inugram.helpers.archive.ArchiveMediaHelper.restoreArchived(currentAccount, message, res)"
+        if original.count(legacy_restore) != 2:
+            raise SystemExit("[ERROR] Archived-media patch is in an unknown state; refusing to guess.")
+        patch.write_text(adapted, encoding="utf-8")
+        print("[OK] Archived-media patch adapted for delegated stock paths.")
+    print("[OK] Stock getPathToAttach arguments, account/message identity and fallback preserved.")
+
+
+def adapt_ios_input_bar_patch(repo: Path) -> None:
+    """Remove translator-only menu code while retaining the iOS input-bar patch."""
+    import re
+
+    patch = repo / "patches" / "entiny" / "chat" / "ios-input-bar.patch"
+    series = repo / "series"
+    if not patch.is_file() or not series.is_file():
+        raise SystemExit("[ERROR] iOS input-bar patch or active series is missing.")
+    active = {line.strip().replace("\\", "/") for line in series.read_text(encoding="utf-8").splitlines()}
+    if "entiny/translator/input-translate.patch" in active:
+        raise SystemExit("[ERROR] Translator patch is active; refusing to remove its input-menu integration.")
+
+    lines = patch.read_text(encoding="utf-8").splitlines(keepends=True)
+    menu_helper = "desu.inugram.helpers.chat.ChatInputMenuHelper"
+    visible_marker = menu_helper + ".isMenuButtonVisible(this)"
+    menu_marker = menu_helper + ".getMenuButton(this)"
+    set_inset = "IosInputHelper.setInputMenuButtonIconInset"
+    menu_offset = "IosInputHelper.getInputMenuButtonOffsetDp"
+    old_translation = "inu_menuBtn.setTranslationX(hasScheduled ? -dp(48) : 0);"
+    joined = "".join(lines)
+
+    def hunk_end(index: int) -> int:
+        return next(
+            (i for i in range(index + 1, len(lines))
+             if lines[i].startswith("@@ -") or lines[i].startswith("diff --git ")),
+            len(lines),
+        )
+
+    hunks = []
+    for index, line in enumerate(lines):
+        if line.startswith("@@ -"):
+            end_index = hunk_end(index)
+            body = lines[index + 1:end_index]
+            file_index = max((i for i in range(index) if lines[i].startswith("diff --git ")), default=-1)
+            hunks.append((index, end_index, body, file_index))
+
+    translator_hunks = [
+        hunk for hunk in hunks
+        if any(menu_helper in line for line in hunk[2])
+    ]
+    if not translator_hunks:
+        if any(marker in joined for marker in (menu_helper, set_inset, menu_offset)):
+            raise SystemExit("[ERROR] iOS input-bar patch has an unknown translator integration state.")
+        print("[OK] iOS input-bar patch already adapted; translator-only menu code remains excluded.")
+        return
+    if len(translator_hunks) != 2:
+        raise SystemExit("[ERROR] Expected two translator-dependent iOS input-bar hunks.")
+
+    added_menu_hunks = [
+        hunk for hunk in translator_hunks
+        if any(line.startswith("+") and visible_marker in line for line in hunk[2])
+    ]
+    replaced_menu_hunks = [
+        hunk for hunk in translator_hunks
+        if any(line.startswith("-") and old_translation in line for line in hunk[2])
+    ]
+    if len(added_menu_hunks) != 1 or len(replaced_menu_hunks) != 1:
+        raise SystemExit("[ERROR] Could not distinguish translator-only iOS input-bar hunks.")
+    added_hunk = added_menu_hunks[0]
+    replaced_hunk = replaced_menu_hunks[0]
+    if added_hunk[3] != replaced_hunk[3] or "ChatActivityEnterView.java" not in lines[added_hunk[3]]:
+        raise SystemExit("[ERROR] Translator-only hunks are not in the expected Java file.")
+    if added_hunk[0] >= replaced_hunk[0]:
+        raise SystemExit("[ERROR] Translator-only hunk order changed; refusing to guess.")
+
+    additions_to_remove: set[int] = set()
+    body_start = added_hunk[0] + 1
+    body_end = added_hunk[1]
+    visible_lines = [
+        i for i in range(body_start, body_end)
+        if lines[i].startswith("+") and visible_marker in lines[i]
+    ]
+    if len(visible_lines) != 1:
+        raise SystemExit("[ERROR] Expected one translator menu visibility branch.")
+    branch_start = visible_lines[0]
+    expected_branch = (
+        "+            } else if (" + visible_marker + ") {",
+        "+                fieldRightMarginDp += DEFAULT_HEIGHT + iosGapDp;",
+        "+            }",
+    )
+    if tuple(line.rstrip("\r\n") for line in lines[branch_start:branch_start + 3]) != expected_branch:
+        raise SystemExit("[ERROR] Translator menu visibility branch changed; refusing to alter nearby iOS layout.")
+    additions_to_remove.update(range(branch_start, branch_start + 3))
+
+    menu_lines = [
+        i for i in range(body_start, body_end)
+        if lines[i].startswith("+") and menu_marker in lines[i]
+    ]
+    if len(menu_lines) != 1:
+        raise SystemExit("[ERROR] Expected one added translator menu button block.")
+    menu_start = menu_lines[0]
+    expected_menu_block = (
+        "+            View inu_menuBtn = " + menu_marker + ";",
+        "+            if (inu_menuBtn != null) {",
+        "+                desu.inugram.helpers.chat.IosInputHelper.setInputMenuButtonIconInset(inu_menuBtn, hasInsideRightIcon);",
+        "+                inu_menuBtn.setTranslationX(dp(desu.inugram.helpers.chat.IosInputHelper.getInputMenuButtonOffsetDp(hasInsideRightIcon, DEFAULT_HEIGHT, iosGapDp)));",
+        "+            }",
+    )
+    if tuple(line.rstrip("\r\n") for line in lines[menu_start:menu_start + 5]) != expected_menu_block:
+        raise SystemExit("[ERROR] Translator menu button block changed; refusing to alter nearby iOS layout.")
+    additions_to_remove.update(range(menu_start, menu_start + 5))
+    if len(additions_to_remove) != 8:
+        raise SystemExit("[ERROR] Unexpected translator-only addition count.")
+
+    header = lines[added_hunk[0]].rstrip("\r\n")
+    match = re.match(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$", header)
+    if not match:
+        raise SystemExit("[ERROR] Invalid translator-only iOS hunk header.")
+    old_count = int(match.group(2) or 1)
+    new_count = int(match.group(4) or 1)
+    if (
+        sum(line.startswith((" ", "-")) for line in added_hunk[2]) != old_count
+        or sum(line.startswith((" ", "+")) for line in added_hunk[2]) != new_count
+    ):
+        raise SystemExit("[ERROR] Translator-only iOS hunk lengths do not match their header.")
+
+    replace_lines: dict[int, str] = {
+        added_hunk[0]: (
+            f"@@ -{match.group(1)},{old_count} +{match.group(3)},{new_count - 8} @@{match.group(5)}\n"
+        )
+    }
+    replaced_header = lines[replaced_hunk[0]].rstrip("\r\n")
+    replaced_match = re.match(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$", replaced_header)
+    if not replaced_match:
+        raise SystemExit("[ERROR] Invalid translator-menu replacement hunk header.")
+    replaced_old = int(replaced_match.group(2) or 1)
+    replaced_new = int(replaced_match.group(4) or 1)
+    replaced_body = replaced_hunk[2]
+    added = sum(line.startswith("+") for line in replaced_body)
+    deleted = sum(line.startswith("-") for line in replaced_body)
+    if (
+        sum(line.startswith((" ", "-")) for line in replaced_body) != replaced_old
+        or sum(line.startswith((" ", "+")) for line in replaced_body) != replaced_new
+        or (added, deleted) != (3, 1)
+        or not any(line.startswith(" ") and menu_marker in line for line in replaced_body)
+    ):
+        raise SystemExit("[ERROR] Translator-menu replacement hunk changed; refusing to remove it.")
+
+    file_start = added_hunk[3]
+    file_end = next(
+        (i for i in range(replaced_hunk[1], len(lines)) if lines[i].startswith("diff --git ")),
+        len(lines),
+    )
+    later_hunks = [hunk for hunk in hunks if replaced_hunk[0] < hunk[0] < file_end]
+    for later in later_hunks:
+        later_match = re.match(
+            r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$",
+            lines[later[0]].rstrip("\r\n"),
+        )
+        if not later_match:
+            raise SystemExit("[ERROR] Invalid following iOS input-bar hunk header.")
+        shift = 10  # eight removed additions, then the removed hunk's net +2 lines
+        new_start = int(later_match.group(3)) - shift
+        if new_start < 1:
+            raise SystemExit("[ERROR] Invalid shifted iOS input-bar hunk position.")
+        replace_lines[later[0]] = (
+            f"@@ -{later_match.group(1)},{later_match.group(2) or 1} "
+            f"+{new_start},{later_match.group(4) or 1} @@{later_match.group(5)}\n"
+        )
+
+    remove_lines = set(additions_to_remove) | set(range(replaced_hunk[0], replaced_hunk[1]))
+    lines = [replace_lines.get(i, line) for i, line in enumerate(lines) if i not in remove_lines]
+
+    first_diff = next((i for i, line in enumerate(lines) if line.startswith("diff --git ")), -1)
+    separator = next((i for i, line in enumerate(lines[:first_diff]) if line.rstrip("\r\n") == "---"), -1)
+    if first_diff < 0 or separator < 0:
+        raise SystemExit("[ERROR] iOS input-bar patch summary header is malformed.")
+    stats = lines[separator + 1:first_diff]
+    target_rows = [i for i, line in enumerate(stats) if "ChatActivityEnterView.java" in line and "|" in line]
+    summary_rows = [i for i, line in enumerate(stats) if "files changed" in line]
+    if len(target_rows) != 1 or len(summary_rows) != 1:
+        raise SystemExit("[ERROR] iOS input-bar diff summary rows are ambiguous.")
+    row = stats[target_rows[0]].rstrip("\r\n")
+    row_match = re.match(r"^(\s*.*?\|\s*)(\d+)(?:\s+.*)?$", row)
+    if not row_match or int(row_match.group(2)) < len(additions_to_remove) + added + deleted:
+        raise SystemExit("[ERROR] Invalid iOS input-bar file summary row.")
+    stats[target_rows[0]] = f"{row_match.group(1)}{int(row_match.group(2)) - len(additions_to_remove) - added - deleted}\n"
+    summary = stats[summary_rows[0]].rstrip("\r\n")
+    summary_match = re.match(
+        r"^(\s*)(\d+) files changed, (\d+) insertions\(\+\), (\d+) deletions\(-\)$",
+        summary,
+    )
+    total_removed_additions = len(additions_to_remove) + added
+    if not summary_match or int(summary_match.group(3)) < total_removed_additions or int(summary_match.group(4)) < deleted:
+        raise SystemExit("[ERROR] Invalid iOS input-bar patch summary totals.")
+    stats[summary_rows[0]] = (
+        f"{summary_match.group(1)}{summary_match.group(2)} files changed, "
+        f"{int(summary_match.group(3)) - total_removed_additions} insertions(+), "
+        f"{int(summary_match.group(4)) - deleted} deletions(-)\n"
+    )
+    lines = lines[:separator + 1] + stats + lines[first_diff:]
+
+    result = "".join(lines)
+    if any(marker in result for marker in (menu_helper, set_inset, menu_offset)):
+        raise SystemExit("[ERROR] Translator-only ChatInputMenuHelper integration remains in iOS input-bar patch.")
+    for index, line in enumerate(lines):
+        if not line.startswith("@@ -"):
+            continue
+        hunk_match = re.match(r"^@@ -(\d+),(\d+) \+(\d+),(\d+) @@", line)
+        if not hunk_match:
+            raise SystemExit("[ERROR] Invalid recalculated iOS input-bar hunk header.")
+        end_index = next(
+            (i for i in range(index + 1, len(lines))
+             if lines[i].startswith("@@ -") or lines[i].startswith("diff --git ")),
+            len(lines),
+        )
+        body = lines[index + 1:end_index]
+        if (
+            sum(item.startswith((" ", "-")) for item in body) != int(hunk_match.group(2))
+            or sum(item.startswith((" ", "+")) for item in body) != int(hunk_match.group(4))
+        ):
+            raise SystemExit("[ERROR] Recalculated iOS input-bar hunk length mismatch.")
+
+    patch.write_text(result, encoding="utf-8")
+    print("[OK] Translator-only ChatInputMenuHelper code removed from iOS input-bar patch.")
+    print("[OK] Remaining iOS input-bar changes and hunk positions recalculated.")
+
+def adapt_burn_voice_round_patch(repo: Path) -> None:
+    """Drop excluded self-destruct context while preserving one-time voice/video expiry."""
+    import re
+
+    patch = repo / "patches" / "entiny" / "media" / "burn-voice-round.patch"
+    if not patch.is_file():
+        raise SystemExit("[ERROR] Burn voice/round patch is missing.")
+
+    original = patch.read_text(encoding="utf-8")
+    old_condition = (
+        "messageObject == null || messageObject.isOut() || !messageObject.isSecretMedia() "
+        "|| messageObject.messageOwner.ttl != 0x7FFFFFFF"
+    )
+    new_condition = (
+        "messageObject == null || messageObject.isOut() || !messageObject.isSecretMedia() "
+        "&& (messageObject.messageOwner.media == null || messageObject.messageOwner.media.ttl_seconds == 0) "
+        "|| messageObject.messageOwner.ttl != 0x7FFFFFFF"
+    )
+    prefix = original.split("\n---\n", 1)[0].rstrip("\r\n") if "\n---\n" in original else ""
+    if not prefix.startswith("From ") or "Subject: burn one-time voice and round videos" not in prefix:
+        raise SystemExit("[ERROR] Burn voice/round patch header changed; refusing to rewrite it.")
+
+    adapted = (
+        prefix + "\n\n---\n"
+        " TMessagesProj/src/main/java/org/telegram/ui/ChatActivity.java | 2 +-\n"
+        " 1 file changed, 1 insertion(+), 1 deletion(-)\n"
+        "\n"
+        "diff --git a/TMessagesProj/src/main/java/org/telegram/ui/ChatActivity.java "
+        "b/TMessagesProj/src/main/java/org/telegram/ui/ChatActivity.java\n"
+        "index 0000000..0000000 100644\n"
+        "--- a/TMessagesProj/src/main/java/org/telegram/ui/ChatActivity.java\n"
+        "+++ b/TMessagesProj/src/main/java/org/telegram/ui/ChatActivity.java\n"
+        "@@ -15787,4 +15787,4 @@ public class ChatActivity extends BaseFragment implements\n"
+        "     private Runnable sendSecretMediaDelete(MessageObject messageObject) {\n"
+        f"-        if ({old_condition}) {{\n"
+        f"+        if ({new_condition}) {{\n"
+        "             return null;\n"
+        "         }\n"
+    )
+
+    lines = adapted.splitlines()
+    headers = [i for i, line in enumerate(lines) if line.startswith("@@ -")]
+    if len(headers) != 1:
+        raise SystemExit("[ERROR] Unexpected burn voice/round hunk count.")
+    match = re.match(r"^@@ -(\d+),(\d+) \+(\d+),(\d+) @@", lines[headers[0]])
+    if not match:
+        raise SystemExit("[ERROR] Invalid burn voice/round hunk header.")
+    body = lines[headers[0] + 1:]
+    if (
+        sum(line.startswith((" ", "-")) for line in body) != int(match.group(2))
+        or sum(line.startswith((" ", "+")) for line in body) != int(match.group(4))
+        or sum(line.startswith("-") and old_condition in line for line in body) != 1
+        or sum(line.startswith("+") and new_condition in line for line in body) != 1
+    ):
+        raise SystemExit("[ERROR] Burn voice/round hunk context or lengths are invalid.")
+
+    if original == adapted:
+        print("[OK] Burn voice/round patch already adapted; one-time media expiry remains enabled.")
+    else:
+        if (
+            original.count("public Runnable sendSecretMediaDelete(MessageObject messageObject)") != 1
+            or original.count("SelfDestructHelper.shouldPreserveMedia(dialog_id)") != 1
+            or original.count(old_condition) != 1
+            or original.count(new_condition) != 1
+        ):
+            raise SystemExit("[ERROR] Burn voice/round patch is in an unknown state; refusing to guess.")
+        patch.write_text(adapted, encoding="utf-8")
+        print("[OK] Burn voice/round patch adapted without the excluded self-destruct context.")
+    print("[OK] One-time voice and round-video expiry condition preserved.")
+
+
+def adapt_feed_chatactivity_patch(repo: Path) -> None:
+    """Remove ghost-mode and reaction-sync context from the independent feed patch."""
+    import re
+
+    patch = repo / "patches" / "entiny" / "feed" / "feed-chatactivity.patch"
+    series = repo / "series"
+    if not patch.is_file() or not series.is_file():
+        raise SystemExit("[ERROR] Feed ChatActivity patch or active series is missing.")
+    active = {line.strip().replace("\\", "/") for line in series.read_text(encoding="utf-8").splitlines()}
+    if "entiny/privacy/ghost-mode.patch" in active or "entiny/chat/reaction-read-sync.patch" in active:
+        raise SystemExit("[ERROR] Excluded privacy/reaction patch is active; refusing to remove its context.")
+
+    lines = patch.read_text(encoding="utf-8").splitlines(keepends=True)
+
+    def records(source: list[str]) -> list[tuple[int, int, int, list[str]]]:
+        found = []
+        for index, line in enumerate(source):
+            if not line.startswith("@@ -"):
+                continue
+            end = next(
+                (i for i in range(index + 1, len(source))
+                 if source[i].startswith("@@ -") or source[i].startswith("diff --git ")),
+                len(source),
+            )
+            file_index = max((i for i in range(index) if source[i].startswith("diff --git ")), default=-1)
+            found.append((index, end, file_index, source[index + 1:end]))
+        return found
+
+    original_hunks = records(lines)
+    joined = "".join(lines)
+    ghost_context = "desu.inugram.helpers.security.GhostHelper.processSendRequest"
+    keep_reactions = "getMessagesController().inu_keepReadReactions(did, msgId"
+    consume_reactions = "inu_consumePendingJumpReactions(messageObject);"
+    translation_context = "desu.inugram.helpers.translate.TranslateHelper.carryTranslation(old, messageObject);"
+    normalize_call = "desu.inugram.helpers.feed.FeedRequestNormalizer.normalize(currentAccount, object);"
+    if (
+        ghost_context not in joined
+        and keep_reactions not in joined
+        and consume_reactions not in joined
+        and translation_context not in joined
+        and sum(line.startswith("+") and normalize_call in line for line in lines) == 1
+    ):
+        print("[OK] Feed ChatActivity patch already adapted; feed request/reaction updates remain enabled.")
+        return
+
+    connection_hunks = [
+        hunk for hunk in original_hunks
+        if hunk[2] >= 0 and "ConnectionsManager.java" in lines[hunk[2]]
+        and any(ghost_context in line for line in hunk[3])
+    ]
+    reaction_context_hunks = [
+        hunk for hunk in original_hunks
+        if hunk[2] >= 0 and "ChatActivity.java" in lines[hunk[2]]
+        and any(keep_reactions in line for line in hunk[3])
+    ]
+    update_hunks = [
+        hunk for hunk in original_hunks
+        if hunk[2] >= 0 and "ChatActivity.java" in lines[hunk[2]]
+        and any(line.startswith("+") and "getMessageObjectForUpdate(did, msgId)" in line for line in hunk[3])
+    ]
+    translation_hunks = [
+        hunk for hunk in original_hunks
+        if hunk[2] >= 0 and "ChatActivity.java" in lines[hunk[2]]
+        and any(translation_context in line for line in hunk[3])
+    ]
+    if (
+        "entiny/translator/input-translate.patch" in active
+        or len(connection_hunks) != 1
+        or len(reaction_context_hunks) != 1
+        or len(update_hunks) != 1
+        or len(translation_hunks) != 1
+    ):
+        raise SystemExit("[ERROR] Feed patch excluded-context hunks are ambiguous or changed.")
+
+    connection = connection_hunks[0]
+    if sum(line.startswith("+") and normalize_call in line for line in connection[3]) != 1:
+        raise SystemExit("[ERROR] Feed request normalizer addition is missing or duplicated.")
+    connection_replacement = [
+        "@@ -402,3 +402,4 @@ public class ConnectionsManager extends BaseController {\n",
+        "         try {\n",
+        "             NativeByteBuffer buffer = new NativeByteBuffer(object.getObjectSize());\n",
+        "             object.serializeToStream(buffer);\n",
+    ]
+    connection_replacement.insert(1, f"+        {normalize_call}\n")
+
+    def remove_context(
+        hunk: tuple[int, int, int, list[str]],
+        markers: tuple[str, ...],
+        start_shift: int = 0,
+    ) -> list[str]:
+        header = lines[hunk[0]].rstrip("\r\n")
+        match = re.match(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$", header)
+        if not match:
+            raise SystemExit("[ERROR] Invalid feed ChatActivity hunk header.")
+        body = list(hunk[3])
+        remove_indexes = set()
+        for marker in markers:
+            matches = [i for i, line in enumerate(body) if marker in line]
+            if len(matches) != 1 or not body[matches[0]].startswith(" "):
+                raise SystemExit("[ERROR] Expected excluded-only feed patch context is missing or changed.")
+            remove_indexes.add(matches[0])
+        body = [line for i, line in enumerate(body) if i not in remove_indexes]
+        old_count = sum(line.startswith((" ", "-")) for line in body)
+        new_count = sum(line.startswith((" ", "+")) for line in body)
+        if old_count < 1 or new_count < 1:
+            raise SystemExit("[ERROR] Invalid feed ChatActivity hunk after context removal.")
+        return [
+            f"@@ -{int(match.group(1)) + start_shift},{old_count} "
+            f"+{int(match.group(3)) + start_shift},{new_count} @@{match.group(5)}\n",
+            *body,
+        ]
+
+    reaction_hunk = reaction_context_hunks[0]
+    reaction_replacement = remove_context(reaction_hunk, (keep_reactions,))
+    update_hunk = update_hunks[0]
+    update_replacement = remove_context(
+        update_hunk,
+        ("invalidateMessagesVisiblePart();", "if (did == dialog_id) {", consume_reactions),
+    )
+
+    if update_hunk[0] <= reaction_hunk[0]:
+        raise SystemExit("[ERROR] Feed reaction hunk order changed; refusing to guess.")
+
+    reaction_header = lines[reaction_hunk[0]].rstrip("\r\n")
+    reaction_match = re.match(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$", reaction_header)
+    preceding_context = "            long did = (Long) args[0];"
+    if not reaction_match or not any(
+        line.startswith(" ") and "doOnIdle(() -> {" in line
+        for line in reaction_replacement[1:]
+    ):
+        raise SystemExit("[ERROR] Stable feed reaction context is missing or changed.")
+    combined_body = [
+        f" {preceding_context}\n",
+        *reaction_replacement[1:],
+        "                         messageObject.forceUpdate = true;\n",
+        *update_replacement[1:],
+        "                 }\n",
+        "             });\n",
+        "         } else if (id == NotificationCenter.savedReactionTagsUpdate) {\n",
+    ]
+    old_count = sum(line.startswith((" ", "-")) for line in combined_body)
+    new_count = sum(line.startswith((" ", "+")) for line in combined_body)
+    combined_replacement = [
+        f"@@ -{int(reaction_match.group(1)) - 1},{old_count} "
+        f"+{int(reaction_match.group(3)) - 1},{new_count} @@{reaction_match.group(5)}\n",
+        *combined_body,
+    ]
+
+    replacements = {
+        connection[0]: (connection[1], connection_replacement),
+        reaction_hunk[0]: (update_hunk[1], combined_replacement),
+    }
+    translation_hunk = translation_hunks[0]
+    translation_replacement = remove_context(translation_hunk, (translation_context,), start_shift=-1)
+    replacements[translation_hunk[0]] = (translation_hunk[1], translation_replacement)
+    downstream_shift = -4  # one omitted reaction-sync line before this hunk and three in it
+    for hunk in original_hunks:
+        if (
+            hunk[0] <= update_hunk[0]
+            or hunk[0] == translation_hunk[0]
+            or hunk[2] < 0
+            or "ChatActivity.java" not in lines[hunk[2]]
+        ):
+            continue
+        header = lines[hunk[0]].rstrip("\r\n")
+        match = re.match(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$", header)
+        if not match:
+            raise SystemExit("[ERROR] Invalid downstream feed ChatActivity hunk header.")
+        translation_shift = -1 if hunk[0] > translation_hunk[0] else 0
+        old_start = int(match.group(1)) + downstream_shift + translation_shift
+        new_start = int(match.group(3)) + downstream_shift + translation_shift
+        if old_start < 1 or new_start < 1:
+            raise SystemExit("[ERROR] Invalid downstream feed ChatActivity hunk position.")
+        replacements[hunk[0]] = (
+            hunk[1],
+            [
+                f"@@ -{old_start},{match.group(2) or 1} "
+                f"+{new_start},{match.group(4) or 1} @@{match.group(5)}\n",
+                *hunk[3],
+            ],
+        )
+    result = []
+    index = 0
+    while index < len(lines):
+        if index in replacements:
+            end, replacement = replacements[index]
+            result.extend(replacement)
+            index = end
+        else:
+            result.append(lines[index])
+            index += 1
+
+    text = "".join(result)
+    if any(marker in text for marker in (ghost_context, keep_reactions, consume_reactions, translation_context)):
+        raise SystemExit("[ERROR] Excluded ghost/reaction context remains in feed patch.")
+    if sum(line.startswith("+") and normalize_call in line for line in result) != 1:
+        raise SystemExit("[ERROR] Feed request normalizer addition was not preserved exactly.")
+    for index, line in enumerate(result):
+        if not line.startswith("@@ -"):
+            continue
+        match = re.match(r"^@@ -(\d+),(\d+) \+(\d+),(\d+) @@", line)
+        if not match:
+            raise SystemExit("[ERROR] Invalid recalculated feed patch hunk header.")
+        end = next(
+            (i for i in range(index + 1, len(result))
+             if result[i].startswith("@@ -") or result[i].startswith("diff --git ")),
+            len(result),
+        )
+        body = result[index + 1:end]
+        if (
+            sum(item.startswith((" ", "-")) for item in body) != int(match.group(2))
+            or sum(item.startswith((" ", "+")) for item in body) != int(match.group(4))
+        ):
+            raise SystemExit("[ERROR] Recalculated feed patch hunk length mismatch.")
+
+    patch.write_text("".join(result), encoding="utf-8")
+    print("[OK] Feed patch adapted without ghost-mode or reaction-read-sync context.")
+    print("[OK] Feed request normalization and reaction-update handling remain enabled.")
+
+
+def adapt_input_menu_reserve_patch(repo: Path) -> None:
+    """Retarget the input-menu reserve hunk to pinned source without translator context."""
+    import re
+
+    patch = repo / "patches" / "entiny" / "chat" / "input-menu-reserve.patch"
+    series = repo / "series"
+    if not patch.is_file() or not series.is_file():
+        raise SystemExit("[ERROR] Input-menu reserve patch or active series is missing.")
+    active = {line.strip().lower().replace("\\", "/") for line in series.read_text(encoding="utf-8").splitlines()}
+    if any("input-translate" in entry for entry in active):
+        raise SystemExit("[ERROR] Excluded input-translate patch is active; refusing to adapt its context.")
+
+    lines = patch.read_text(encoding="utf-8").splitlines(keepends=True)
+    joined = "".join(lines)
+    menu_check = "desu.inugram.helpers.chat.ChatInputMenuHelper.isMenuButtonVisible(this)"
+    if (
+        re.search(r"^@@ -9380,6 \+9380,9 @@", joined, re.MULTILINE)
+        and sum(line.startswith("+") and menu_check in line for line in lines) == 1
+        and not any(line.startswith(" ") and menu_check in line for line in lines)
+    ):
+        print("[OK] Input-menu reserve patch already adapted; menu spacing remains enabled.")
+        return
+
+    hunk_indexes = [index for index, line in enumerate(lines) if line.startswith("@@ -")]
+    if (
+        len(hunk_indexes) != 1
+        or "ChatActivityEnterView.java" not in joined
+        or sum(line.startswith("+") and menu_check in line for line in lines) != 1
+        or sum(line.startswith(" ") and menu_check in line for line in lines) != 1
+        or sum("layoutParams.rightMargin = dp(98);" in line for line in lines) < 1
+    ):
+        raise SystemExit("[ERROR] Input-menu reserve patch context is ambiguous or changed.")
+
+    start = hunk_indexes[0]
+    replacement = [
+        "@@ -9380,6 +9380,9 @@ public class ChatActivityEnterView extends FrameLayout implements\n",
+        "             } else {\n",
+        "                 layoutParams.rightMargin = dp(50);\n",
+        "             }\n",
+        f"+            if ({menu_check}) {{\n",
+        "+                layoutParams.rightMargin += dp(48);\n",
+        "+            }\n",
+        "         } else {\n",
+        "             if (scheduledButton != null && scheduledButton.getTag() != null) {\n",
+        "                 layoutParams.rightMargin = dp(50);\n",
+    ]
+    result = lines[:start] + replacement
+    if (
+        sum(line.startswith((" ", "-")) for line in replacement[1:]) != 6
+        or sum(line.startswith((" ", "+")) for line in replacement[1:]) != 9
+        or sum(line.startswith("+") and menu_check in line for line in result) != 1
+    ):
+        raise SystemExit("[ERROR] Rebuilt input-menu reserve hunk has invalid counts or behavior.")
+    patch.write_text("".join(result), encoding="utf-8")
+    print("[OK] Input-menu reserve hunk retargeted without input-translate context.")
+    print("[OK] Menu-button spacing remains enabled.")
+
+
+def adapt_local_names_patch(repo: Path) -> None:
+    """Drop the local-premium-only context from the independent local-name patch."""
+    import re
+
+    patch = repo / "patches" / "entiny" / "ui" / "local-names.patch"
+    series = repo / "series"
+    if not patch.is_file() or not series.is_file():
+        raise SystemExit("[ERROR] Local-names patch or active series is missing.")
+    active = {line.strip().lower().replace("\\", "/") for line in series.read_text(encoding="utf-8").splitlines()}
+    if any("local-premium" in entry for entry in active):
+        raise SystemExit("[ERROR] Excluded local-premium patch is active; refusing to adapt its context.")
+
+    lines = patch.read_text(encoding="utf-8").splitlines(keepends=True)
+    marker = "desu.inugram.helpers.LocalPremiumHelper.applyToSelfUser(user, currentAccount);"
+    addition = "desu.inugram.helpers.profile.LocalNameHelper.applyTo(user, currentAccount);"
+    if marker not in "".join(lines):
+        if sum(line.startswith("+") and addition in line for line in lines) == 1:
+            print("[OK] Local-names patch already adapted; local profile names remain enabled.")
+            return
+        raise SystemExit("[ERROR] Local-names patch is in an unknown state; refusing to guess.")
+
+    marker_lines = [index for index, line in enumerate(lines) if marker in line]
+    if len(marker_lines) != 1 or not lines[marker_lines[0]].startswith(" "):
+        raise SystemExit("[ERROR] Local-premium context in local-names patch is ambiguous or changed.")
+    target_hunk = next(
+        (hunk for hunk in range(marker_lines[0] - 1, -1, -1) if lines[hunk].startswith("@@ -")),
+        -1,
+    )
+    target_file = max(
+        (index for index in range(target_hunk) if lines[index].startswith("diff --git ")),
+        default=-1,
+    )
+    if target_hunk < 0 or target_file < 0 or "MessagesController.java" not in lines[target_file]:
+        raise SystemExit("[ERROR] Local-names context is outside the expected MessagesController hunk.")
+
+    def hunk_end(index: int) -> int:
+        return next(
+            (i for i in range(index + 1, len(lines))
+             if lines[i].startswith("@@ -") or lines[i].startswith("diff --git ")),
+            len(lines),
+        )
+
+    header = lines[target_hunk].rstrip("\r\n")
+    match = re.match(r"^@@ -(\d+),(\d+) \+(\d+),(\d+) @@(.*)$", header)
+    end = hunk_end(target_hunk)
+    body = list(lines[target_hunk + 1:end])
+    context_indexes = [index for index, line in enumerate(body) if marker in line]
+    if not match or len(context_indexes) != 1 or not body[context_indexes[0]].startswith(" "):
+        raise SystemExit("[ERROR] Local-names hunk header or context is invalid.")
+    body.pop(context_indexes[0])
+    old_count = sum(line.startswith((" ", "-")) for line in body)
+    new_count = sum(line.startswith((" ", "+")) for line in body)
+    replacements = {
+        target_hunk: (
+            end,
+            [
+                f"@@ -{match.group(1)},{old_count} +{match.group(3)},{new_count} @@{match.group(5)}\n",
+                *body,
+            ],
+        )
+    }
+
+    file_end = next(
+        (index for index in range(target_file + 1, len(lines)) if lines[index].startswith("diff --git ")),
+        len(lines),
+    )
+    for index in range(target_hunk + 1, file_end):
+        if not lines[index].startswith("@@ -"):
+            continue
+        later = re.match(r"^@@ -(\d+),(\d+) \+(\d+),(\d+) @@(.*)$", lines[index].rstrip("\r\n"))
+        if not later:
+            raise SystemExit("[ERROR] Later local-names hunk header is invalid.")
+        replacements[index] = (
+            hunk_end(index),
+            [
+                f"@@ -{int(later.group(1)) - 1},{later.group(2)} "
+                f"+{int(later.group(3)) - 1},{later.group(4)} @@{later.group(5)}\n",
+                *lines[index + 1:hunk_end(index)],
+            ],
+        )
+
+    result = []
+    index = 0
+    while index < len(lines):
+        if index in replacements:
+            end, replacement = replacements[index]
+            result.extend(replacement)
+            index = end
+        else:
+            result.append(lines[index])
+            index += 1
+    text = "".join(result)
+    if marker in text or sum(line.startswith("+") and addition in line for line in result) != 1:
+        raise SystemExit("[ERROR] Local-names patch still contains excluded context or lost its behavior.")
+    for index, line in enumerate(result):
+        if not line.startswith("@@ -"):
+            continue
+        counts = re.match(r"^@@ -\d+,(\d+) \+\d+,(\d+) @@", line)
+        end = next(
+            (i for i in range(index + 1, len(result))
+             if result[i].startswith("@@ -") or result[i].startswith("diff --git ")),
+            len(result),
+        )
+        body = result[index + 1:end]
+        if (
+            not counts
+            or sum(item.startswith((" ", "-")) for item in body) != int(counts.group(1))
+            or sum(item.startswith((" ", "+")) for item in body) != int(counts.group(2))
+        ):
+            raise SystemExit("[ERROR] Local-names patch hunk counts are invalid after adaptation.")
+    patch.write_text(text, encoding="utf-8")
+    print("[OK] Local-names patch adapted without local-premium context.")
+    print("[OK] Local profile name and avatar behavior remains enabled.")
+
+
+def adapt_system_folders_patch(repo: Path) -> None:
+    """Keep system-folder matching without the excluded folder-membership context."""
+    import re
+
+    patch = repo / "patches" / "entiny" / "tabs" / "system-folders.patch"
+    series = repo / "series"
+    if not patch.is_file() or not series.is_file():
+        raise SystemExit("[ERROR] System-folders patch or active series is missing.")
+    active = {line.strip().lower().replace("\\", "/") for line in series.read_text(encoding="utf-8").splitlines()}
+    if any("unlimited-folder-chats" in entry for entry in active):
+        raise SystemExit("[ERROR] Excluded folder-membership restriction patch is active; refusing to adapt its context.")
+
+    lines = patch.read_text(encoding="utf-8").splitlines(keepends=True)
+    membership_context = "desu.inugram.helpers.dialogs.FolderMembershipHelper.isLocallyIncluded("
+    administrator_check = "desu.inugram.helpers.dialogs.SystemFoldersHelper.isAdministratorFolder(id)"
+    administrator_match = "desu.inugram.helpers.dialogs.SystemFoldersHelper.matchesAdministrator(accountInstance.getCurrentAccount(), dialogId)"
+    if membership_context not in "".join(lines):
+        if (
+            sum(line.startswith("+") and administrator_check in line for line in lines) == 1
+            and sum(line.startswith("+") and administrator_match in line for line in lines) == 1
+        ):
+            print("[OK] System-folders patch already adapted; administrator folder matching remains enabled.")
+            return
+        raise SystemExit("[ERROR] System-folders patch is in an unknown state; refusing to guess.")
+
+    marker_lines = [index for index, line in enumerate(lines) if membership_context in line]
+    target_hunk = next(
+        (hunk for hunk in range(marker_lines[0] - 1, -1, -1) if lines[hunk].startswith("@@ -")),
+        -1,
+    ) if len(marker_lines) == 1 else -1
+    target_file = max(
+        (index for index in range(target_hunk) if lines[index].startswith("diff --git ")),
+        default=-1,
+    )
+    if (
+        target_hunk < 0
+        or target_file < 0
+        or "MessagesController.java" not in lines[target_file]
+        or not lines[marker_lines[0]].startswith(" ")
+    ):
+        raise SystemExit("[ERROR] Folder-membership context is ambiguous or outside MessagesController.")
+
+    end = next(
+        (index for index in range(target_hunk + 1, len(lines))
+         if lines[index].startswith("@@ -") or lines[index].startswith("diff --git ")),
+        len(lines),
+    )
+    header = lines[target_hunk].rstrip("\r\n")
+    match = re.match(r"^@@ -\d+,\d+ \+\d+,\d+ @@(.*)$", header)
+    if not match:
+        raise SystemExit("[ERROR] System-folders MessagesController hunk header is invalid.")
+    replacement = [
+        f"@@ -1314,6 +1314,9 @@{match.group(1)}\n",
+        "             if (alwaysShow.contains(dialogId)) {\n",
+        "                 return true;\n",
+        "+            }\n",
+        f"+            if ({administrator_check}) {{\n",
+        f"+                return {administrator_match};\n",
+        "             }\n",
+        "             if (d.folder_id != 0 && (flags & DIALOG_FILTER_FLAG_EXCLUDE_ARCHIVED) != 0) {\n",
+        "                 return false;\n",
+        "             }\n",
+    ]
+    result = lines[:target_hunk] + replacement + lines[end:]
+    if (
+        membership_context in "".join(result)
+        or sum(line.startswith("+") and administrator_check in line for line in result) != 1
+        or sum(line.startswith("+") and administrator_match in line for line in result) != 1
+        or sum(line.startswith((" ", "-")) for line in replacement[1:]) != 6
+        or sum(line.startswith((" ", "+")) for line in replacement[1:]) != 9
+    ):
+        raise SystemExit("[ERROR] System-folders hunk lost behavior or has invalid line counts.")
+    patch.write_text("".join(result), encoding="utf-8")
+    print("[OK] System-folders patch adapted without folder-membership context.")
+    print("[OK] Administrator-folder matching remains enabled.")
+
+
+def adapt_private_reply_multiline_patch(repo: Path) -> None:
+    """Retarget the inaccessible-reply fix without excluded deleted-reply context."""
+    import re
+
+    patch = repo / "patches" / "bugfix" / "private-reply-multiline.patch"
+    series = repo / "series"
+    if not patch.is_file() or not series.is_file():
+        raise SystemExit("[ERROR] Private-reply patch or active series is missing.")
+    active = {line.strip().lower().replace("\\", "/") for line in series.read_text(encoding="utf-8").splitlines()}
+    if any("show-deleted-replies" in entry for entry in active):
+        raise SystemExit("[ERROR] Excluded deleted-replies patch is active; refusing to adapt its context.")
+
+    lines = patch.read_text(encoding="utf-8").splitlines(keepends=True)
+    deleted_reply_context = "!messageObject.inu_isReplyToDeletedMessage()"
+    old_expression = "                isReplyQuote = hasReplyQuote && messageObject.messageOwner.reply_to.quote;"
+    replacement_expression = (
+        "                isReplyQuote = hasReplyQuote && (messageObject.messageOwner.reply_to.quote || "
+        "desu.inugram.helpers.chat.ChatHelper.isReplyToInaccessibleChat(currentAccount, messageObject));"
+    )
+    if deleted_reply_context not in "".join(lines):
+        if sum(line.startswith("+") and replacement_expression in line for line in lines) == 1:
+            print("[OK] Private-reply patch already adapted; inaccessible-chat quote text remains enabled.")
+            return
+        raise SystemExit("[ERROR] Private-reply patch is in an unknown state; refusing to guess.")
+
+    hunk_indexes = [index for index, line in enumerate(lines) if line.startswith("@@ -")]
+    if (
+        len(hunk_indexes) != 1
+        or "ChatMessageCell.java" not in "".join(lines)
+        or sum(line.startswith("-") and old_expression in line for line in lines) != 1
+        or sum(line.startswith("+") and replacement_expression in line for line in lines) != 1
+    ):
+        raise SystemExit("[ERROR] Private-reply hunk is ambiguous or changed.")
+    header = lines[hunk_indexes[0]].rstrip("\r\n")
+    match = re.match(r"^@@ -\d+,\d+ \+\d+,\d+ @@(.*)$", header)
+    if not match:
+        raise SystemExit("[ERROR] Private-reply patch hunk header is invalid.")
+    hunk = [
+        f"@@ -19474,7 +19474,7 @@{match.group(1)}\n",
+        " \n",
+        "                 CharSequence name = null;\n",
+        "                 hasReplyQuote = messageObject.messageOwner.reply_to != null && (messageObject.messageOwner.reply_to.flags & 64) != 0 && messageObject.messageOwner.reply_to.quote_text != null;\n",
+        f"-{old_expression}\n",
+        f"+{replacement_expression}\n",
+        "                 final boolean showQuote = isReplyQuote && messageObject.messageOwner.reply_to.quote;\n",
+        "                 if (isReplyQuote && showQuote && replyQuoteDrawable == null) {\n",
+        "                     replyQuoteDrawable = getContext().getResources().getDrawable(R.drawable.mini_quote).mutate();\n",
+    ]
+    result = lines[:hunk_indexes[0]] + hunk
+    if (
+        deleted_reply_context in "".join(result)
+        or sum(line.startswith("+") and replacement_expression in line for line in result) != 1
+        or sum(line.startswith((" ", "-")) for line in hunk[1:]) != 7
+        or sum(line.startswith((" ", "+")) for line in hunk[1:]) != 7
+    ):
+        raise SystemExit("[ERROR] Private-reply hunk lost behavior or has invalid line counts.")
+    patch.write_text("".join(result), encoding="utf-8")
+    print("[OK] Private-reply patch adapted without deleted-replies context.")
+    print("[OK] Inaccessible-chat quote rendering remains enabled.")
+
+
+def adapt_hide_business_bot_banner_patch(repo: Path) -> None:
+    """Retarget the banner toggle without excluded translator-expression context."""
+    import re
+
+    patch = repo / "patches" / "entiny" / "chat" / "hide-business-bot-banner.patch"
+    series = repo / "series"
+    if not patch.is_file() or not series.is_file():
+        raise SystemExit("[ERROR] Business-banner patch or active series is missing.")
+    active = {line.strip().lower().replace("\\", "/") for line in series.read_text(encoding="utf-8").splitlines()}
+    if any("translator/translator.patch" in entry for entry in active):
+        raise SystemExit("[ERROR] Excluded translator patch is active; refusing to adapt its context.")
+
+    lines = patch.read_text(encoding="utf-8").splitlines(keepends=True)
+    old_expression = "boolean showBizBot = currentEncryptedChat == null && getUserConfig().isPremium()"
+    excluded_translator_context = "boolean showTranslate = getMessagesController().getTranslateController().isDialogTranslatable(getDialogId())"
+    toggle = "!desu.inugram.InuConfig.HIDE_BUSINESS_BOT_BANNER.getValue()"
+    joined = "".join(lines)
+    if (
+        re.search(r"^@@ -30077,5 \+30077,5 @@", joined, re.MULTILINE)
+        and excluded_translator_context not in joined
+        and sum(line.startswith("+") and toggle in line for line in lines) == 1
+    ):
+        print("[OK] Business-banner patch already adapted; the hide toggle remains enabled.")
+        return
+    if old_expression not in joined:
+        raise SystemExit("[ERROR] Business-banner patch is in an unknown state; refusing to guess.")
+    if sum(line.startswith("+") and toggle in line for line in lines) != 1 or len(
+        [line for line in lines if line.startswith("@@ -")]
+    ) != 1:
+        raise SystemExit("[ERROR] Business-banner hunk is ambiguous or changed.")
+    hunk_index = next(index for index, line in enumerate(lines) if line.startswith("@@ -"))
+    header = lines[hunk_index].rstrip("\r\n")
+    match = re.match(r"^@@ -\d+,\d+ \+\d+,\d+ @@(.*)$", header)
+    if not match:
+        raise SystemExit("[ERROR] Business-banner hunk header is invalid.")
+    old = "        boolean showBizBot = currentEncryptedChat == null && getUserConfig().isPremium() && preferences.getLong(\"dialog_botid\" + did, 0) != 0 || DEBUG_TOP_PANELS;"
+    new = "        boolean showBizBot = !desu.inugram.InuConfig.HIDE_BUSINESS_BOT_BANNER.getValue() && currentEncryptedChat == null && getUserConfig().isPremium() && preferences.getLong(\"dialog_botid\" + did, 0) != 0 || DEBUG_TOP_PANELS;"
+    hunk = [
+        f"@@ -30077,5 +30077,5 @@{match.group(1)}\n",
+        "         ) || DEBUG_TOP_PANELS;\n",
+        "         boolean showAddProfilePicture = UserObject.isBot(currentUser) && currentUser.bot_can_edit && currentUser.photo == null;\n",
+        f"-{old}\n",
+        f"+{new}\n",
+        "         boolean showBotAd = currentUser != null && currentUser.bot && messages.size() >= 2 && botSponsoredMessage != null;\n",
+        "         if (showRestartTopic) {\n",
+    ]
+    result = lines[:hunk_index] + hunk
+    if (
+        sum(line.startswith((" ", "-")) for line in hunk[1:]) != 5
+        or sum(line.startswith((" ", "+")) for line in hunk[1:]) != 5
+        or sum(line.startswith("+") and toggle in line for line in result) != 1
+    ):
+        raise SystemExit("[ERROR] Business-banner hunk has invalid counts or lost its toggle.")
+    patch.write_text("".join(result), encoding="utf-8")
+    print("[OK] Business-banner patch retargeted without translator context.")
+    print("[OK] The hide-business-banner toggle remains enabled.")
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo", required=True, type=Path, help="EntinyGram checkout directory")
@@ -295,6 +1268,15 @@ def main() -> int:
     series.write_text("\n".join(kept) + "\n", encoding="utf-8")
     adapt_playback_patch(repo)
     adapt_premium_badge_patch(repo)
+    adapt_archive_media_patch(repo)
+    adapt_ios_input_bar_patch(repo)
+    adapt_burn_voice_round_patch(repo)
+    adapt_feed_chatactivity_patch(repo)
+    adapt_input_menu_reserve_patch(repo)
+    adapt_local_names_patch(repo)
+    adapt_system_folders_patch(repo)
+    adapt_private_reply_multiline_patch(repo)
+    adapt_hide_business_bot_banner_patch(repo)
 
     src = builder / "overlay" / "src" / "fork-app" / "linky7"
     if not src.is_dir() or not (src / "Linky7StudioActivity.kt").is_file():
