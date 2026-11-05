@@ -27,6 +27,9 @@ BLOCKED = {
     "entiny/ai/ai-summary-inline.patch",
     "entiny/translator/translator.patch",
     "entiny/translator/input-translate.patch",
+    # Temporary fallback for the failing Java input-bar compilation.
+    "entiny/chat/ios-input-bar.patch",
+    "entiny/chat/input-menu-reserve.patch",
     # Avoid locally unlocking Telegram-paid/restricted limits.
     "entiny/premium/local-premium.patch",
     "entiny/restrictions/unlimited-fav-stickers.patch",
@@ -49,7 +52,7 @@ BLOCK_TOKENS = (
     "screenshot-notification", "allow-screenshot", "screenshot-bypass", "skip-login",
     "login-countdown", "countdown-skip", "local-premium", "premium-unlock",
     "unlimited-pinned", "unlimited-fav", "unlimited-folder", "unlimited-stickers",
-    "entiny/ai/", "translator", "input-translate", "liquid-glass",
+    "entiny/ai/", "translator", "input-translate", "ios-input-bar", "input-menu-reserve", "liquid-glass",
     "popup-swipeback-live-blur", "image-cache-large-heap",
 )
 
