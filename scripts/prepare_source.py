@@ -107,9 +107,19 @@ def adapt_playback_patch(repo: Path) -> None:
         if index != h + 1 or not lines[index].startswith(" "):
             raise SystemExit("[ERROR] Unexpected translator context position.")
 
+        # The upstream patch has one empty context line between these statements.
+        # In a unified diff, that blank context line is represented by a single space.
+        anchor = index + 1
         if (
-            index + 1 >= len(lines)
-            or "addToPolls(messageObject, old);" not in lines[index + 1]
+            anchor < len(lines)
+            and lines[anchor].startswith(" ")
+            and not lines[anchor].strip()
+        ):
+            anchor += 1
+
+        if (
+            anchor >= len(lines)
+            or "addToPolls(messageObject, old);" not in lines[anchor]
         ):
             raise SystemExit("[ERROR] Playback patch anchor changed.")
 
@@ -118,7 +128,15 @@ def adapt_playback_patch(repo: Path) -> None:
 
     elif (
         h + 1 < len(lines)
-        and "addToPolls(messageObject, old);" in lines[h + 1]
+        and (
+            "addToPolls(messageObject, old);" in lines[h + 1]
+            or (
+                h + 2 < len(lines)
+                and lines[h + 1].startswith(" ")
+                and not lines[h + 1].strip()
+                and "addToPolls(messageObject, old);" in lines[h + 2]
+            )
+        )
     ):
         print("[OK] Playback patch already adapted.")
     else:
