@@ -97,7 +97,7 @@ jobs:
           # Pluginless keeps the full Telegram client while omitting the separate JS plugin engine.
           # Use EntinyGram's documented setup command. It prepares both worktree
           # and worktree-pluginless; pluginless is the intended native client target.
-          bun run setup
+          bun scripts/setup.ts --ci --pluginless
           cd "$GITHUB_WORKSPACE"
           python3 scripts/apply_native.py \
             --repo entinyGram \
