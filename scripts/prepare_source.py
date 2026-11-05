@@ -1443,6 +1443,287 @@ def adapt_excluded_helper_references(repo: Path) -> None:
         if addition not in adapted_patch:
             raise SystemExit("[ERROR] Chat blur resume behavior was lost: " + addition.strip())
 
+
+def adapt_pluginless_helper_apis(repo: Path) -> None:
+    """Keep retained helpers buildable when their translator patches are excluded."""
+    import re
+
+    def add_pluginless_object_stub(
+        relative_path: str,
+        object_name: str,
+        sentinel: str,
+        stub: str,
+    ) -> None:
+        path = repo / "src" / "fork" / relative_path
+        if not path.is_file():
+            raise SystemExit(f"[ERROR] Required helper source is missing: {relative_path}")
+        source = path.read_text(encoding="utf-8")
+        if sentinel in source:
+            if (
+                source.count(sentinel) != 1
+                or not source.rstrip().endswith("// #endif")
+                or "// #else\n" + stub.strip() not in source
+            ):
+                raise SystemExit(f"[ERROR] Pluginless helper adapter is malformed: {relative_path}")
+            print(f"[OK] Pluginless helper stub already present: {relative_path}")
+            return
+
+        object_header = f"object {object_name} {{\n"
+        if source.count(object_header) != 1:
+            raise SystemExit(f"[ERROR] Helper declaration changed: {relative_path}")
+        object_start = source.index(object_header)
+        object_source = source[object_start:].rstrip()
+        if not object_source.endswith("}"):
+            raise SystemExit(f"[ERROR] Helper is not the final source declaration: {relative_path}")
+        source = (
+            source[:object_start]
+            + "// #if PLUGINS\n"
+            + object_source
+            + "\n// #else\n"
+            + stub.strip()
+            + "\n// #endif\n"
+        )
+        path.write_text(source, encoding="utf-8")
+        print(f"[OK] Pluginless helper stub added: {relative_path}")
+
+    translate_stub = """object TranslateHelper {
+    // LINKY7_PLUGINLESS_TRANSLATE_STUB
+    @JvmStatic
+    fun resolveTargetLanguage(): String = ""
+
+    @JvmStatic
+    fun currentTargetLanguage(): String = ""
+
+    @JvmStatic
+    fun outgoingTargetLanguage(): String = ""
+
+    @JvmStatic
+    fun hasTimeAddition(msg: MessageObject?): Boolean = false
+
+    @JvmStatic
+    fun timeAdditionsHash(msg: MessageObject?): Int = 0
+
+    @JvmStatic
+    fun extraTimeWidth(msg: MessageObject?): Int = 0
+
+    @JvmStatic
+    fun appendTimePrefix(sb: SpannableStringBuilder, msg: MessageObject?) {}
+
+    @JvmStatic
+    fun isManualTranslated(
+        msg: MessageObject?,
+        group: MessageObject.GroupedMessages? = null,
+    ): Boolean = false
+
+    @JvmStatic
+    fun isManuallyAffected(
+        msg: MessageObject?,
+        group: MessageObject.GroupedMessages? = null,
+    ): Boolean = false
+
+    @JvmStatic
+    fun bypassesLanguageGate(msg: MessageObject?): Boolean = false
+
+    @JvmStatic
+    fun hasTranslatableWebPage(msg: MessageObject?): Boolean = false
+
+    @JvmStatic
+    fun startTranslate(
+        activity: ChatActivity,
+        selected: MessageObject?,
+        group: MessageObject.GroupedMessages?,
+        fromLang: String?,
+        toLang: String?,
+        provider: String? = null,
+    ): Boolean = false
+
+    @JvmStatic
+    fun triggerTranslate(
+        activity: ChatActivity,
+        selected: MessageObject?,
+        group: MessageObject.GroupedMessages?,
+        provider: String? = null,
+    ) {}
+
+    @JvmStatic
+    fun revert(activity: ChatActivity, msg: MessageObject) {}
+
+    @JvmStatic
+    fun resetForDialog(dialogId: Long) {}
+}"""
+    add_pluginless_object_stub(
+        "helpers/translate/TranslateHelper.kt",
+        "TranslateHelper",
+        "LINKY7_PLUGINLESS_TRANSLATE_STUB",
+        translate_stub,
+    )
+
+    instant_view_stub = """object InstantViewHelper {
+    // LINKY7_PLUGINLESS_INSTANT_VIEW_STUB
+    const val MENU_ITEM_ID = 100
+    private const val COCOON_SUMMARY_CAPTION = "Cocoon AI Summary"
+
+    @JvmStatic
+    fun shouldHideBlock(block: TL_iv.PageBlock?): Boolean {
+        if (InuConfig.HIDE_IV_SUMMARY.value && block is TL_iv.pageBlockBlockquote) {
+            val caption = ArticleViewer.getPlainText(block.caption) ?: return false
+            return caption.toString() == COCOON_SUMMARY_CAPTION
+        }
+        return false
+    }
+}"""
+    add_pluginless_object_stub(
+        "helpers/translate/InstantViewHelper.kt",
+        "InstantViewHelper",
+        "LINKY7_PLUGINLESS_INSTANT_VIEW_STUB",
+        instant_view_stub,
+    )
+
+    input_menu_stub = """object ChatInputMenuHelper {
+    // LINKY7_PLUGINLESS_INPUT_MENU_STUB
+    @JvmStatic
+    fun isMenuButtonVisible(enterView: ChatActivityEnterView): Boolean = false
+}"""
+    add_pluginless_object_stub(
+        "helpers/chat/ChatInputMenuHelper.kt",
+        "ChatInputMenuHelper",
+        "LINKY7_PLUGINLESS_INPUT_MENU_STUB",
+        input_menu_stub,
+    )
+
+    chat_helper = repo / "src" / "fork" / "helpers" / "chat" / "ChatHelper.kt"
+    if not chat_helper.is_file():
+        raise SystemExit("[ERROR] Chat helper source is missing.")
+    source = chat_helper.read_text(encoding="utf-8")
+    old_replace = "            enterView.replaceWithText(start, len, spannable, false)\n"
+    pluginless_replace = """            // #if PLUGINS
+            enterView.replaceWithText(start, len, spannable, false)
+            // #else
+            // LINKY7_PLUGINLESS_EDIT_FIELD_REPLACEMENT
+            val editField = enterView.editField ?: return@showInputDialog false
+            val editable = editField.text
+            val replaceStart = start.coerceIn(0, editable.length)
+            val replaceEnd = (replaceStart + len).coerceIn(replaceStart, editable.length)
+            editable.replace(replaceStart, replaceEnd, spannable)
+            editField.setSelection(replaceStart + spannable.length)
+            // #endif
+"""
+    replace_sentinel = "LINKY7_PLUGINLESS_EDIT_FIELD_REPLACEMENT"
+    if source.count(replace_sentinel) == 1:
+        if (
+            source.count("enterView.replaceWithText(start, len, spannable, false)") != 1
+            or source.count("editable.replace(replaceStart, replaceEnd, spannable)") != 1
+            or source.count("// #if PLUGINS\n            enterView.replaceWithText") != 1
+        ):
+            raise SystemExit("[ERROR] Chat mention replacement adapter is malformed.")
+        print("[OK] Chat mention replacement adapter already present.")
+    elif source.count(old_replace) == 1:
+        source = source.replace(old_replace, pluginless_replace, 1)
+        chat_helper.write_text(source, encoding="utf-8")
+        print("[OK] Chat mention replacement has a pluginless EditText path.")
+    else:
+        raise SystemExit("[ERROR] Chat mention replacement call is in an unknown state.")
+
+    forward_helper = repo / "src" / "fork" / "helpers" / "chat" / "ForwardProHelper.kt"
+    if not forward_helper.is_file():
+        raise SystemExit("[ERROR] Forward helper source is missing.")
+    source = forward_helper.read_text(encoding="utf-8")
+    old_entities = (
+        "        return ChatActivityEnterView.applyMessageEntities("
+        "ArrayList(owner.entities ?: emptyList()), raw, fontMetrics) ?: raw\n"
+    )
+    pluginless_entities = """        // #if PLUGINS
+        return ChatActivityEnterView.applyMessageEntities(ArrayList(owner.entities ?: emptyList()), raw, fontMetrics) ?: raw
+        // #else
+        // LINKY7_PLUGINLESS_FORWARD_ENTITY_ADAPTER
+        val styled = SpannableStringBuilder(raw)
+        MessageObject.addEntitiesToText(styled, ArrayList(owner.entities ?: emptyList()), false, false, false, true)
+        return styled
+        // #endif
+"""
+    entity_sentinel = "LINKY7_PLUGINLESS_FORWARD_ENTITY_ADAPTER"
+    if source.count(entity_sentinel) == 1:
+        if (
+            source.count("return ChatActivityEnterView.applyMessageEntities(") != 1
+            or source.count("MessageObject.addEntitiesToText(styled,") != 1
+            or source.count("// #if PLUGINS\n        return ChatActivityEnterView") != 1
+        ):
+            raise SystemExit("[ERROR] Forward text entity adapter is malformed.")
+        print("[OK] Forward text entity adapter already present.")
+    elif source.count(old_entities) == 1:
+        source = source.replace(old_entities, pluginless_entities, 1)
+        forward_helper.write_text(source, encoding="utf-8")
+        print("[OK] Forward text formatting has a pluginless entity adapter.")
+    else:
+        raise SystemExit("[ERROR] Forward entity formatter is in an unknown state.")
+
+    minimize_patch = repo / "patches" / "feature" / "minimize-attach-panel.patch"
+    if not minimize_patch.is_file():
+        raise SystemExit("[ERROR] Attach-panel patch is missing.")
+    patch_text = minimize_patch.read_text(encoding="utf-8")
+    old_field = (
+        "     private ImageView attachButton;\n"
+        "+    public CounterView.CounterDrawable inu_attachBadge;\n"
+    )
+    new_field = (
+        "     private ImageView attachButton;\n"
+        "+    public CounterView.CounterDrawable inu_attachBadge;\n"
+        "+    public ImageView inu_getAttachButton() { return attachButton; }\n"
+    )
+    accessor_line = "+    public ImageView inu_getAttachButton() { return attachButton; }\n"
+    if patch_text.count(accessor_line) == 1:
+        if (
+            patch_text.count(new_field) != 1
+            or "@@ -641,6 +641,8 @@" not in patch_text
+            or patch_text.count("3 files changed, 45 insertions(+), 5 deletions(-)") != 1
+        ):
+            raise SystemExit("[ERROR] Adapted attach-panel patch is malformed.")
+        print("[OK] Attach-panel accessor patch already adapted.")
+    elif patch_text.count(old_field) == 1:
+        if patch_text.count("@@ -641,6 +641,7 @@") != 1:
+            raise SystemExit("[ERROR] Attach-panel field hunk header changed.")
+        if len([
+            line for line in patch_text.splitlines()
+            if "ChatActivityEnterView.java" in line
+            and re.search(r"\|\s+7\s+\+", line)
+        ]) != 1:
+            raise SystemExit("[ERROR] Attach-panel diffstat changed.")
+        if patch_text.count("3 files changed, 44 insertions(+), 5 deletions(-)") != 1:
+            raise SystemExit("[ERROR] Attach-panel patch summary changed.")
+        patch_text = patch_text.replace(old_field, new_field, 1)
+        patch_text = patch_text.replace("@@ -641,6 +641,7 @@", "@@ -641,6 +641,8 @@", 1)
+        patch_text, stat_count = re.subn(
+            r"(ChatActivityEnterView\.java\s+\|\s+)7(?=\s+\+)",
+            r"\g<1>8",
+            patch_text,
+            count=1,
+        )
+        if stat_count != 1:
+            raise SystemExit("[ERROR] Attach-panel file diffstat could not be updated.")
+        patch_text = patch_text.replace(
+            "3 files changed, 44 insertions(+), 5 deletions(-)",
+            "3 files changed, 45 insertions(+), 5 deletions(-)",
+            1,
+        )
+        minimize_patch.write_text(patch_text, encoding="utf-8")
+        print("[OK] Attach-panel patch exposes a narrow attach-button accessor.")
+    else:
+        raise SystemExit("[ERROR] Attach-panel patch is in an unknown state.")
+
+    attach_helper = repo / "src" / "fork" / "helpers" / "chat" / "AttachMinimizeHelper.kt"
+    if not attach_helper.is_file():
+        raise SystemExit("[ERROR] Attach-minimize helper source is missing.")
+    source = attach_helper.read_text(encoding="utf-8")
+    old_attach = "        val button = enterView.attachButton ?: return\n"
+    new_attach = "        val button = enterView.inu_getAttachButton() ?: return\n"
+    if source.count(old_attach) == 1:
+        attach_helper.write_text(source.replace(old_attach, new_attach, 1), encoding="utf-8")
+        print("[OK] Attach badge helper uses the narrow button accessor.")
+    elif old_attach not in source and source.count(new_attach) == 1:
+        print("[OK] Attach badge helper accessor already adapted.")
+    else:
+        raise SystemExit("[ERROR] Attach badge button access is in an unknown state.")
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo", required=True, type=Path, help="EntinyGram checkout directory")
@@ -1479,6 +1760,7 @@ def main() -> int:
     adapt_private_reply_multiline_patch(repo)
     adapt_hide_business_bot_banner_patch(repo)
     adapt_excluded_helper_references(repo)
+    adapt_pluginless_helper_apis(repo)
 
     src = builder / "overlay" / "src" / "fork-app" / "linky7"
     if not src.is_dir() or not (src / "Linky7StudioActivity.kt").is_file():
