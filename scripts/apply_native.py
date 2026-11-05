@@ -95,6 +95,41 @@ def patch_buildvars(path: Path, api_id: str, api_hash: str) -> None:
     path.write_text(text, encoding="utf-8")
 
 
+def patch_ndk_cpufeatures(path: Path) -> None:
+    """Replace the removed NDK CMake helper with its shipped cpufeatures source."""
+    if not path.is_file():
+        raise RuntimeError(f"Native CMake project missing: {path}")
+
+    text = path.read_text(encoding="utf-8")
+    legacy = "include(AndroidNdkModules)\nandroid_ndk_import_module_cpufeatures()"
+    replacement = (
+        'set(CPUFEATURES_DIR "${ANDROID_NDK}/sources/android/cpufeatures")\n'
+        'if(NOT EXISTS "${CPUFEATURES_DIR}/cpu-features.c" OR '
+        'NOT EXISTS "${CPUFEATURES_DIR}/cpu-features.h")\n'
+        '    message(FATAL_ERROR "Android NDK cpufeatures sources are missing: ${CPUFEATURES_DIR}")\n'
+        "endif()\n"
+        'add_library(cpufeatures STATIC "${CPUFEATURES_DIR}/cpu-features.c")\n'
+        'target_include_directories(cpufeatures PUBLIC "${CPUFEATURES_DIR}")\n'
+        "set_target_properties(cpufeatures PROPERTIES POSITION_INDEPENDENT_CODE ON)"
+    )
+
+    if text.count(legacy) == 1:
+        text = text.replace(legacy, replacement, 1)
+        path.write_text(text, encoding="utf-8")
+        print("[OK] Legacy NDK cpufeatures helper replaced with the NDK source library.")
+    elif text.count(replacement) == 1 and legacy not in text:
+        print("[OK] NDK cpufeatures CMake integration already adapted.")
+    else:
+        raise RuntimeError("Unexpected NDK cpufeatures CMake state; refusing to alter native build configuration.")
+
+    if (
+        not re.search(r"(?s)target_link_libraries\s*\([^)]*\bcpufeatures\b", text)
+        or text.count('add_library(cpufeatures STATIC "${CPUFEATURES_DIR}/cpu-features.c")') != 1
+        or "android_ndk_import_module_cpufeatures()" in text
+    ):
+        raise RuntimeError("NDK cpufeatures target or its existing native linkage was not preserved.")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo", required=True, type=Path)
@@ -109,6 +144,8 @@ def main() -> int:
     app_project = worktree / "TMessagesProj_App"
     if not (main_project / "src/main/AndroidManifest.xml").is_file():
         raise RuntimeError("Pinned Telegram Android manifest was not found in worktree-pluginless.")
+
+    patch_ndk_cpufeatures(main_project / "jni/CMakeLists.txt")
 
     # The upstream app id is deliberately retained to preserve EntinyGram's matching
     # Firebase/push project and account authorities. The installed display name is Linky7.
