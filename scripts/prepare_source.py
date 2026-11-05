@@ -53,6 +53,140 @@ BLOCK_TOKENS = (
     "popup-swipeback-live-blur", "image-cache-large-heap",
 )
 
+
+def adapt_playback_patch(repo: Path) -> None:
+    """Remove only the translator-only context from the playback patch."""
+    import re
+
+    patch = (
+        repo / "patches" / "bugfix" /
+        "playback-progress-on-message-replace.patch"
+    )
+
+    if not patch.is_file():
+        raise SystemExit("[ERROR] Playback patch is missing.")
+
+    lines = patch.read_text(encoding="utf-8").splitlines(keepends=True)
+
+    headers = [
+        i for i, line in enumerate(lines)
+        if line.startswith("@@ -")
+    ]
+
+    if len(headers) != 1:
+        raise SystemExit("[ERROR] Unexpected playback patch structure.")
+
+    h = headers[0]
+    header = lines[h].rstrip("\r\n")
+
+    match = re.match(
+        r"^@@ -(\d+)(?:,(\d+))? "
+        r"\+(\d+)(?:,(\d+))? @@(.*)$",
+        header
+    )
+
+    if not match:
+        raise SystemExit("[ERROR] Invalid playback patch header.")
+
+    marker = "TranslateHelper.carryTranslation(old, messageObject);"
+
+    matches = [
+        i for i, line in enumerate(lines)
+        if marker in line
+    ]
+
+    shift = 0
+
+    if matches:
+        if len(matches) != 1:
+            raise SystemExit("[ERROR] Ambiguous translator context.")
+
+        index = matches[0]
+
+        # The translator line must be the first context line.
+        if index != h + 1 or not lines[index].startswith(" "):
+            raise SystemExit("[ERROR] Unexpected translator context position.")
+
+        if (
+            index + 1 >= len(lines)
+            or "addToPolls(messageObject, old);" not in lines[index + 1]
+        ):
+            raise SystemExit("[ERROR] Playback patch anchor changed.")
+
+        del lines[index]
+        shift = 1
+
+    elif (
+        h + 1 < len(lines)
+        and "addToPolls(messageObject, old);" in lines[h + 1]
+    ):
+        print("[OK] Playback patch already adapted.")
+    else:
+        raise SystemExit("[ERROR] Unknown playback patch state.")
+
+    # Locate the complete hunk.
+    end = next(
+        (
+            i for i in range(h + 1, len(lines))
+            if lines[i].startswith("@@ -")
+            or lines[i].startswith("diff --git ")
+        ),
+        len(lines)
+    )
+
+    body = lines[h + 1:end]
+
+    # Preserve all seven playback additions.
+    required = [
+        "MediaController.getInstance().isPlayingMessage(messageObject)",
+        "MessageObject player = MediaController.getInstance().getPlayingMessageObject();",
+        "messageObject.audioProgress = player.audioProgress;",
+        "messageObject.audioProgressSec = player.audioProgressSec;",
+        "messageObject.audioPlayerDuration = player.audioPlayerDuration;",
+        "messageObject.bufferedProgress = player.bufferedProgress;",
+    ]
+
+    for item in required:
+        if not any(
+            line.startswith("+") and item in line
+            for line in body
+        ):
+            raise SystemExit(
+                "[ERROR] Required playback code missing: " + item
+            )
+
+    # Recalculate both hunk lengths from the actual patch body.
+    old_count = sum(
+        line.startswith((" ", "-")) for line in body
+    )
+    new_count = sum(
+        line.startswith((" ", "+")) for line in body
+    )
+
+    if old_count < 1 or new_count < old_count:
+        raise SystemExit("[ERROR] Invalid recalculated hunk.")
+
+    old_start = int(match.group(1)) + shift
+    new_start = int(match.group(3)) + shift
+
+    lines[h] = (
+        f"@@ -{old_start},{old_count} "
+        f"+{new_start},{new_count} @@{match.group(5)}\n"
+    )
+
+    result = "".join(lines)
+
+    if marker in result:
+        raise SystemExit("[ERROR] Translator dependency remains.")
+
+    patch.write_text(result, encoding="utf-8")
+
+    print("[OK] Translator-only context removed.")
+    print(f"[OK] Hunk recalculated: {old_count} -> {new_count}.")
+    print("[OK] All playback-progress additions preserved.")
+
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo", required=True, type=Path, help="EntinyGram checkout directory")
@@ -77,6 +211,7 @@ def main() -> int:
         raise SystemExit(f"[ERROR] Unexpectedly short patch series after privacy filter ({len(kept)} entries); refusing to continue.")
     (repo / "series.linky7-original").write_text("\n".join(lines) + "\n", encoding="utf-8")
     series.write_text("\n".join(kept) + "\n", encoding="utf-8")
+    adapt_playback_patch(repo)
 
     src = builder / "overlay" / "src" / "fork-app" / "linky7"
     if not src.is_dir() or not (src / "Linky7StudioActivity.kt").is_file():
