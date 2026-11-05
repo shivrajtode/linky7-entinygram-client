@@ -205,6 +205,70 @@ def adapt_playback_patch(repo: Path) -> None:
 
 
 
+
+def adapt_premium_badge_patch(repo: Path) -> None:
+    """Drop the excluded local-premium-only context from the badge display patch."""
+    import re
+
+    patch = repo / "patches" / "entiny" / "premium" / "premium-badge-dialogs.patch"
+    if not patch.is_file():
+        raise SystemExit("[ERROR] Premium badge patch is missing.")
+
+    lines = patch.read_text(encoding="utf-8").splitlines(keepends=True)
+    marker = "desu.inugram.helpers.LocalPremiumHelper.applyToSelfUser(user, currentAccount);"
+    user_badge = "desu.inugram.helpers.badges.BadgeRegistry.applyTo(user);"
+    chat_badge = "desu.inugram.helpers.badges.BadgeRegistry.applyTo(chat);"
+    matches = [i for i, line in enumerate(lines) if marker in line]
+
+    if matches:
+        if len(matches) != 1:
+            raise SystemExit("[ERROR] Ambiguous LocalPremiumHelper context in premium badge patch.")
+        index = matches[0]
+        if not lines[index].startswith(" "):
+            raise SystemExit("[ERROR] LocalPremiumHelper line is not patch context; refusing to alter a code change.")
+        if sum(line.startswith("+") and user_badge in line for line in lines) != 1:
+            raise SystemExit("[ERROR] Expected exactly one user BadgeRegistry addition.")
+        if sum(line.startswith("+") and chat_badge in line for line in lines) != 1:
+            raise SystemExit("[ERROR] Expected exactly one chat BadgeRegistry addition.")
+
+        hunk_start = max((i for i in range(index) if lines[i].startswith("@@ -")), default=-1)
+        if hunk_start < 0:
+            raise SystemExit("[ERROR] Could not locate premium badge hunk header.")
+        header = lines[hunk_start].rstrip("\r\n")
+        match = re.match(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$", header)
+        if not match:
+            raise SystemExit("[ERROR] Invalid premium badge hunk header.")
+
+        del lines[index]
+        hunk_end = next(
+            (i for i in range(hunk_start + 1, len(lines))
+             if lines[i].startswith("@@ -") or lines[i].startswith("diff --git ")),
+            len(lines),
+        )
+        body = lines[hunk_start + 1:hunk_end]
+        old_count = sum(line.startswith((" ", "-")) for line in body)
+        new_count = sum(line.startswith((" ", "+")) for line in body)
+        if old_count < 1 or new_count < old_count:
+            raise SystemExit("[ERROR] Invalid premium badge hunk after context removal.")
+        lines[hunk_start] = (
+            f"@@ -{match.group(1)},{old_count} +{match.group(3)},{new_count} @@{match.group(5)}\n"
+        )
+        result = "".join(lines)
+        if marker in result:
+            raise SystemExit("[ERROR] LocalPremiumHelper dependency remains in premium badge patch.")
+        if result.count(user_badge) != 1 or result.count(chat_badge) != 1:
+            raise SystemExit("[ERROR] Premium badge changes were not preserved exactly.")
+        patch.write_text(result, encoding="utf-8")
+        print(f"[OK] Premium badge patch adapted; first hunk recalculated {old_count}/{new_count}.")
+        print("[OK] Both BadgeRegistry additions preserved; local-premium remains excluded.")
+        return
+
+    # Safe repeat: the patch was already adapted by an earlier run.
+    if marker not in "".join(lines) and sum(line.startswith("+") and user_badge in line for line in lines) == 1 and sum(line.startswith("+") and chat_badge in line for line in lines) == 1:
+        print("[OK] Premium badge patch already adapted; both badge additions are present.")
+        return
+    raise SystemExit("[ERROR] Premium badge patch is in an unknown state; refusing to guess.")
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo", required=True, type=Path, help="EntinyGram checkout directory")
@@ -230,6 +294,7 @@ def main() -> int:
     (repo / "series.linky7-original").write_text("\n".join(lines) + "\n", encoding="utf-8")
     series.write_text("\n".join(kept) + "\n", encoding="utf-8")
     adapt_playback_patch(repo)
+    adapt_premium_badge_patch(repo)
 
     src = builder / "overlay" / "src" / "fork-app" / "linky7"
     if not src.is_dir() or not (src / "Linky7StudioActivity.kt").is_file():
