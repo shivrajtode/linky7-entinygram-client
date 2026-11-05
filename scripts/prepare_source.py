@@ -877,6 +877,136 @@ def adapt_feed_chatactivity_patch(repo: Path) -> None:
     print("[OK] Feed request normalization and reaction-update handling remain enabled.")
 
 
+
+def adapt_feed_without_ios_input_bar(repo: Path) -> None:
+    """Remove only feed UI hunks that depend on the excluded iOS input-bar patch."""
+    import re
+
+    patch = repo / "patches" / "entiny" / "feed" / "feed-chatactivity.patch"
+    series = repo / "series"
+
+    if not patch.is_file() or not series.is_file():
+        raise SystemExit("[ERROR] Feed patch or active series is missing.")
+
+    active = {
+        line.strip().replace("\\", "/")
+        for line in series.read_text(encoding="utf-8").splitlines()
+    }
+
+    if "entiny/chat/ios-input-bar.patch" in active:
+        raise SystemExit(
+            "[ERROR] iOS input-bar patch is active; refusing to remove its feed context."
+        )
+
+    lines = patch.read_text(encoding="utf-8").splitlines(keepends=True)
+
+    markers = (
+        "chatInputViewsContainer.drawInputBackground",
+        "setInputBarGlassFactory",
+        "final boolean flatInput =",
+    )
+
+    hunks = []
+
+    for index, line in enumerate(lines):
+        if not line.startswith("@@ -"):
+            continue
+
+        end = next(
+            (
+                i for i in range(index + 1, len(lines))
+                if lines[i].startswith("@@ -")
+                or lines[i].startswith("diff --git ")
+            ),
+            len(lines),
+        )
+
+        file_index = max(
+            (
+                i for i in range(index)
+                if lines[i].startswith("diff --git ")
+            ),
+            default=-1,
+        )
+
+        if file_index < 0 or "ChatActivity.java" not in lines[file_index]:
+            continue
+
+        body = lines[index + 1:end]
+
+        if any(marker in "".join(body) for marker in markers):
+            hunks.append((index, end, body))
+
+    if not hunks:
+        joined = "".join(lines)
+        if not any(marker in joined for marker in markers):
+            print("[OK] Feed patch already adapted for stock input bar.")
+            return
+        raise SystemExit("[ERROR] Found unexpected iOS input-bar references in feed patch.")
+
+    if len(hunks) != 2:
+        raise SystemExit(
+            f"[ERROR] Expected exactly two optional iOS-dependent feed hunks; found {len(hunks)}."
+        )
+
+    remove = set()
+
+    for start, end, body in hunks:
+        deleted = [line for line in body if line.startswith("-")]
+        added = [line for line in body if line.startswith("+")]
+
+        if (
+            len(deleted) != 1
+            or len(added) != 1
+            or "chatInputViewsContainer.drawInputBackground" not in deleted[0]
+            or "chatInputViewsContainer.drawInputBackground" not in added[0]
+            or "!isFeedSearch()" not in added[0]
+        ):
+            raise SystemExit(
+                "[ERROR] Feed UI hunk differs from the expected optional input-background change."
+            )
+
+        remove.update(range(start, end))
+
+    result = [line for i, line in enumerate(lines) if i not in remove]
+    joined = "".join(result)
+
+    if any(marker in joined for marker in markers) or "isIosInputAppearance()" in joined:
+        raise SystemExit("[ERROR] An excluded iOS input-bar dependency remains in feed patch.")
+
+    for index, line in enumerate(result):
+        if not line.startswith("@@ -"):
+            continue
+
+        match = re.match(
+            r"^@@ -\d+,(\d+) \+\d+,(\d+) @@",
+            line.rstrip("\r\n"),
+        )
+
+        if not match:
+            raise SystemExit("[ERROR] Invalid remaining feed patch hunk header.")
+
+        end = next(
+            (
+                i for i in range(index + 1, len(result))
+                if result[i].startswith("@@ -")
+                or result[i].startswith("diff --git ")
+            ),
+            len(result),
+        )
+
+        body = result[index + 1:end]
+
+        if (
+            sum(x.startswith((" ", "-")) for x in body) != int(match.group(1))
+            or sum(x.startswith((" ", "+")) for x in body) != int(match.group(2))
+        ):
+            raise SystemExit("[ERROR] Remaining feed patch hunk counts are invalid.")
+
+    patch.write_text("".join(result), encoding="utf-8")
+    print("[OK] Removed exactly two optional iOS-dependent feed UI hunks.")
+    print("[OK] Feed search, feed loading and reaction-update changes preserved.")
+
 def adapt_input_menu_reserve_patch(repo: Path) -> None:
     """Retarget the input-menu reserve hunk to pinned source without translator context."""
     import re
@@ -1757,6 +1887,7 @@ def main() -> int:
     adapt_ios_input_bar_patch(repo)
     adapt_burn_voice_round_patch(repo)
     adapt_feed_chatactivity_patch(repo)
+    adapt_feed_without_ios_input_bar(repo)
     adapt_input_menu_reserve_patch(repo)
     adapt_local_names_patch(repo)
     adapt_system_folders_patch(repo)
