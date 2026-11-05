@@ -1242,6 +1242,207 @@ def adapt_hide_business_bot_banner_patch(repo: Path) -> None:
     print("[OK] Business-banner patch retargeted without translator context.")
     print("[OK] The hide-business-banner toggle remains enabled.")
 
+
+def adapt_excluded_helper_references(repo: Path) -> None:
+    """Keep active helpers buildable without enabling excluded translator/glass patches."""
+    import re
+
+    translate = repo / "src" / "fork" / "helpers" / "translate" / "TranslateHelper.kt"
+    if not translate.is_file():
+        raise SystemExit("[ERROR] Translation helper source is missing.")
+    source = translate.read_text(encoding="utf-8")
+    old_compare = "MediaDataController.richMessageEquals(oldOwner.rich_message, newOwner.rich_message)"
+    new_compare = "richMessagesEqual(oldOwner.rich_message, newOwner.rich_message)"
+    compare_helper = (
+        "    private fun richMessagesEqual(a: TL_iv.RichMessage?, b: TL_iv.RichMessage?): Boolean {\n"
+        "        if (a === b) return true\n"
+        "        if (a == null || b == null) return false\n"
+        "        return try {\n"
+        "            val bufA = SerializedData()\n"
+        "            val bufB = SerializedData()\n"
+        "            a.serializeToStream(bufA)\n"
+        "            b.serializeToStream(bufB)\n"
+        "            bufA.toByteArray().contentEquals(bufB.toByteArray())\n"
+        "        } catch (e: Exception) {\n"
+        "            FileLog.e(e)\n"
+        "            false\n"
+        "        }\n"
+        "    }\n\n"
+    )
+    carry_marker = "    @JvmStatic\n    fun carryTranslation(old: MessageObject?, updated: MessageObject?) {"
+    if source.count(old_compare) == 1 and "private fun richMessagesEqual(" not in source:
+        if source.count(carry_marker) != 1:
+            raise SystemExit("[ERROR] Translation helper insertion point changed; refusing to guess.")
+        for import_line in (
+            "import org.telegram.messenger.FileLog\n",
+            "import org.telegram.tgnet.SerializedData\n",
+            "import org.telegram.tgnet.tl.TL_iv\n",
+        ):
+            if import_line not in source:
+                anchor = "import org.telegram.tgnet.TLRPC\n"
+                if source.count(anchor) != 1:
+                    raise SystemExit("[ERROR] Translation helper import section changed.")
+                source = source.replace(anchor, import_line + anchor, 1)
+        source = source.replace(old_compare, new_compare, 1)
+        source = source.replace(carry_marker, compare_helper + carry_marker, 1)
+        translate.write_text(source, encoding="utf-8")
+        print("[OK] Translation helper now compares rich messages without the excluded visibility patch.")
+    elif (
+        old_compare not in source
+        and source.count(new_compare) == 1
+        and source.count(compare_helper.rstrip()) == 1
+        and all(
+            line in source
+            for line in (
+                "import org.telegram.messenger.FileLog\n",
+                "import org.telegram.tgnet.SerializedData\n",
+                "import org.telegram.tgnet.tl.TL_iv\n",
+            )
+        )
+    ):
+        print("[OK] Translation helper comparison already adapted.")
+    else:
+        raise SystemExit("[ERROR] Translation helper is in an unknown state; refusing to alter it.")
+
+    ios = repo / "src" / "fork" / "ui" / "settings" / "IosStyleSettingsActivity.kt"
+    if not ios.is_file():
+        raise SystemExit("[ERROR] iOS style settings source is missing.")
+    ios_source = ios.read_text(encoding="utf-8")
+    refresh_call = "                    refreshLiquidGlassEffects()\n"
+    refresh_method = (
+        "    private fun refreshLiquidGlassEffects() {\n"
+        "        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {\n"
+        "            BlurredBackgroundDrawableRenderNode.inu_invalidateLiquidGlassDrawables()\n"
+        "        }\n"
+        "    }\n"
+    )
+    if ios_source.count(refresh_call) == 3 and ios_source.count(refresh_method) == 1:
+        if (
+            ios_source.count("import android.os.Build\n") != 1
+            or ios_source.count("import org.telegram.ui.Components.blur3.drawable.BlurredBackgroundDrawableRenderNode\n") != 1
+        ):
+            raise SystemExit("[ERROR] iOS settings liquid-glass imports changed; refusing to guess.")
+        for assignment in (
+            "InuConfig.LIQUID_GLASS_ANGLE.value = it.toInt()",
+            "InuConfig.LIQUID_GLASS_INTENSITY.value = it.toInt()",
+            "InuConfig.LIQUID_GLASS_TINT.value = it.toInt()",
+        ):
+            if ios_source.count(assignment) != 1:
+                raise SystemExit("[ERROR] iOS settings slider behavior changed; refusing to alter it.")
+        ios_source = ios_source.replace(refresh_call, "", 3)
+        ios_source = ios_source.replace(refresh_method, "", 1)
+        ios_source = ios_source.replace("import android.os.Build\n", "", 1)
+        ios_source = ios_source.replace(
+            "import org.telegram.ui.Components.blur3.drawable.BlurredBackgroundDrawableRenderNode\n",
+            "",
+            1,
+        )
+        ios.write_text(ios_source, encoding="utf-8")
+        print("[OK] iOS settings no longer call the refresh method from the excluded liquid-glass patch.")
+    elif (
+        "refreshLiquidGlassEffects()" not in ios_source
+        and "inu_invalidateLiquidGlassDrawables" not in ios_source
+        and "import android.os.Build\n" not in ios_source
+        and "import org.telegram.ui.Components.blur3.drawable.BlurredBackgroundDrawableRenderNode\n" not in ios_source
+        and all(
+            ios_source.count(assignment) == 1
+            for assignment in (
+                "InuConfig.LIQUID_GLASS_ANGLE.value = it.toInt()",
+                "InuConfig.LIQUID_GLASS_INTENSITY.value = it.toInt()",
+                "InuConfig.LIQUID_GLASS_TINT.value = it.toInt()",
+            )
+        )
+    ):
+        print("[OK] iOS settings refresh dependency already removed; slider settings remain enabled.")
+    else:
+        raise SystemExit("[ERROR] iOS settings liquid-glass dependency is in an unknown state.")
+
+    blur_patch = repo / "patches" / "entiny" / "chat" / "chat-blur-resume-settle.patch"
+    if not blur_patch.is_file():
+        raise SystemExit("[ERROR] Chat blur resume patch is missing.")
+    patch_lines = blur_patch.read_text(encoding="utf-8").splitlines(keepends=True)
+    stale_call = (
+        "+                    org.telegram.ui.Components.blur3.drawable."
+        "BlurredBackgroundDrawableRenderNode.inu_invalidateLiquidGlassDrawables();"
+    )
+    stale_indices = [i for i, line in enumerate(patch_lines) if line.rstrip("\r\n") == stale_call]
+    required_blur_additions = (
+        "contentView.invalidateBlur();",
+        "                checkInsets();",
+        "                updatePagedownButtonsPosition();",
+        "invalidateMergedVisibleBlurredPositionsAndSources(BLUR_INVALIDATE_FLAG_POSITIONS | BLUR_INVALIDATE_FLAG_CLIP);",
+        "invalidateAllGlassAttachedViews();",
+    )
+    if stale_indices:
+        if len(stale_indices) != 1:
+            raise SystemExit("[ERROR] Chat blur patch has an ambiguous excluded liquid-glass reference.")
+        stale_index = stale_indices[0]
+        hunk_start = max((i for i in range(stale_index) if patch_lines[i].startswith("@@ -")), default=-1)
+        if hunk_start < 0:
+            raise SystemExit("[ERROR] Chat blur patch hunk header is missing.")
+        header_match = re.match(
+            r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$",
+            patch_lines[hunk_start].rstrip("\r\n"),
+        )
+        if not header_match:
+            raise SystemExit("[ERROR] Chat blur patch hunk header is invalid.")
+        del patch_lines[stale_index]
+        hunk_end = next(
+            (i for i in range(hunk_start + 1, len(patch_lines))
+             if patch_lines[i].startswith("@@ -") or patch_lines[i].startswith("diff --git ")),
+            len(patch_lines),
+        )
+        body = patch_lines[hunk_start + 1:hunk_end]
+        old_count = sum(line.startswith((" ", "-")) for line in body)
+        new_count = sum(line.startswith((" ", "+")) for line in body)
+        patch_lines[hunk_start] = (
+            f"@@ -{header_match.group(1)},{old_count} +{header_match.group(3)},{new_count} @@"
+            f"{header_match.group(5)}\n"
+        )
+
+        separator = next((i for i, line in enumerate(patch_lines) if line.rstrip("\r\n") == "---"), -1)
+        first_diff = next((i for i, line in enumerate(patch_lines) if line.startswith("diff --git ")), -1)
+        if separator < 0 or first_diff < 0 or separator >= first_diff:
+            raise SystemExit("[ERROR] Chat blur patch summary header is malformed.")
+        stats = patch_lines[separator + 1:first_diff]
+        row_matches = [i for i, line in enumerate(stats) if "ChatActivity.java" in line and "|" in line]
+        summary_matches = [i for i, line in enumerate(stats) if re.search(r"\d+ files? changed", line)]
+        if len(row_matches) != 1 or len(summary_matches) != 1:
+            raise SystemExit("[ERROR] Chat blur patch summary rows are ambiguous.")
+        row = stats[row_matches[0]].rstrip("\r\n")
+        row_match = re.match(r"^(\s*.*?\|\s*)(\d+)(\s+.*)$", row)
+        if not row_match or int(row_match.group(2)) < 1:
+            raise SystemExit("[ERROR] Chat blur patch file summary is invalid.")
+        stats[row_matches[0]] = f"{row_match.group(1)}{int(row_match.group(2)) - 1}{row_match.group(3)}\n"
+        summary = stats[summary_matches[0]].rstrip("\r\n")
+        summary_match = re.match(
+            r"^(\s*)(\d+) files? changed, (\d+) insertions\(\+\)"
+            r"(?:, (\d+) deletions\(-\))?$",
+            summary,
+        )
+        if not summary_match or int(summary_match.group(3)) < 1:
+            raise SystemExit("[ERROR] Chat blur patch totals are invalid.")
+        stats[summary_matches[0]] = (
+            f"{summary_match.group(1)}{summary_match.group(2)} file"
+            f"{'s' if int(summary_match.group(2)) != 1 else ''} changed, "
+            f"{int(summary_match.group(3)) - 1} insertions(+)"
+            f"{', ' + summary_match.group(4) + ' deletions(-)' if summary_match.group(4) is not None else ''}\n"
+        )
+        patch_lines = patch_lines[:separator + 1] + stats + patch_lines[first_diff:]
+        blur_patch.write_text("".join(patch_lines), encoding="utf-8")
+        print("[OK] Chat blur resume patch no longer references the excluded liquid-glass helper.")
+    elif not any("inu_invalidateLiquidGlassDrawables" in line for line in patch_lines):
+        print("[OK] Chat blur resume patch already adapted for the excluded liquid-glass helper.")
+    else:
+        raise SystemExit("[ERROR] Chat blur patch has an unknown excluded-helper state.")
+
+    adapted_patch = blur_patch.read_text(encoding="utf-8")
+    if "inu_invalidateLiquidGlassDrawables" in adapted_patch:
+        raise SystemExit("[ERROR] Excluded liquid-glass helper remains in the active chat blur patch.")
+    for addition in required_blur_additions:
+        if addition not in adapted_patch:
+            raise SystemExit("[ERROR] Chat blur resume behavior was lost: " + addition.strip())
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo", required=True, type=Path, help="EntinyGram checkout directory")
@@ -1277,6 +1478,7 @@ def main() -> int:
     adapt_system_folders_patch(repo)
     adapt_private_reply_multiline_patch(repo)
     adapt_hide_business_bot_banner_patch(repo)
+    adapt_excluded_helper_references(repo)
 
     src = builder / "overlay" / "src" / "fork-app" / "linky7"
     if not src.is_dir() or not (src / "Linky7StudioActivity.kt").is_file():
