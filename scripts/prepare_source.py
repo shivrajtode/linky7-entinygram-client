@@ -1007,6 +1007,148 @@ def adapt_feed_without_ios_input_bar(repo: Path) -> None:
     print("[OK] Removed exactly two optional iOS-dependent feed UI hunks.")
     print("[OK] Feed search, feed loading and reaction-update changes preserved.")
 
+def adapt_slowmode_media_edit_patch(repo: Path) -> None:
+    """Re-anchor the slow-mode/media-edit patch on stock Telegram context.
+
+    The upstream patch uses ``getSlowModePillWidth()`` as trailing context, but that
+    method is only introduced by the deliberately excluded iOS input-bar patch.
+    Stock Telegram has ``updateSlowModeText()`` directly after ``getSlowModeTimer()``.
+    Only that one context line changes; the actual edit is untouched.
+    """
+    import re
+
+    patch = repo / "patches" / "bugfix" / "slowmode-blocks-media-edit.patch"
+    series = repo / "series"
+    if not patch.is_file() or not series.is_file():
+        raise SystemExit("[ERROR] Slowmode media-edit patch or active series is missing.")
+
+    active = {
+        line.strip().replace("\\", "/")
+        for line in series.read_text(encoding="utf-8").splitlines()
+    }
+    if "bugfix/slowmode-blocks-media-edit.patch" not in active:
+        print("[OK] Slowmode media-edit patch not in active series; nothing to adapt.")
+        return
+    if "entiny/chat/ios-input-bar.patch" in active:
+        raise SystemExit("[ERROR] iOS input-bar patch is active; refusing to re-anchor slowmode patch.")
+
+    text = patch.read_text(encoding="utf-8")
+    old_ctx = "     public int getSlowModePillWidth() {\n"
+    new_ctx = "     private void updateSlowModeText() {\n"
+    removed = "-        return slowModeTimer > 0 ? slowModeButton.getText() : null;\n"
+    added = "+        return slowModeTimer > 0 && editingMessageObject == null ? slowModeButton.getText() : null;\n"
+
+    if text.count("\n@@ -") != 1 or text.count("\ndiff --git ") != 1:
+        raise SystemExit("[ERROR] Slowmode media-edit patch no longer has exactly one file and one hunk.")
+    if "ChatActivityEnterView.java" not in text or removed not in text or added not in text:
+        raise SystemExit("[ERROR] Slowmode media-edit patch differs from the expected getSlowModeTimer change.")
+
+    if old_ctx in text:
+        if text.count(old_ctx) != 1:
+            raise SystemExit("[ERROR] Unexpected repeated getSlowModePillWidth context in slowmode patch.")
+        text = text.replace(old_ctx, new_ctx)
+        patch.write_text(text, encoding="utf-8")
+        print("[OK] Re-anchored slowmode media-edit patch on stock updateSlowModeText() context.")
+    elif new_ctx in text:
+        print("[OK] Slowmode media-edit patch already re-anchored for stock source.")
+    else:
+        raise SystemExit("[ERROR] Slowmode media-edit patch trailing context is neither upstream nor adapted form.")
+
+    text = patch.read_text(encoding="utf-8")
+    lines = text.splitlines(keepends=True)
+    idx = next(i for i, l in enumerate(lines) if l.startswith("@@ -"))
+    m = re.match(r"^@@ -\d+,(\d+) \+\d+,(\d+) @@", lines[idx])
+    if not m:
+        raise SystemExit("[ERROR] Invalid slowmode patch hunk header.")
+    body = lines[idx + 1:]
+    if (
+        sum(x.startswith((" ", "-")) for x in body) != int(m.group(1))
+        or sum(x.startswith((" ", "+")) for x in body) != int(m.group(2))
+    ):
+        raise SystemExit("[ERROR] Slowmode patch hunk counts are invalid after adaptation.")
+
+def adapt_forbidden_record_button_patch(repo: Path) -> None:
+    """Drop one iOS-only leading context line from the forbidden-record-button patch.
+
+    Hunk 3 uses ``updateAudioVideoSendButtonColor();`` as leading context, a helper that is
+    only introduced by the deliberately excluded iOS input-bar patch. The edit itself
+    (moving ``currentModeVideo`` and simplifying the voice/round fallback) is independent;
+    its remaining context (``audioVideoSendButton.invalidate(); updateFieldHint(false);``)
+    plus the removed line anchor it uniquely on stock Telegram.
+    """
+    import re
+
+    patch = repo / "patches" / "entiny" / "chat" / "forbidden-record-button-mode.patch"
+    series = repo / "series"
+    if not patch.is_file() or not series.is_file():
+        raise SystemExit("[ERROR] Forbidden-record-button patch or active series is missing.")
+
+    active = {
+        line.strip().replace("\\", "/")
+        for line in series.read_text(encoding="utf-8").splitlines()
+    }
+    if "entiny/chat/forbidden-record-button-mode.patch" not in active:
+        print("[OK] Forbidden-record-button patch not in active series; nothing to adapt.")
+        return
+    if "entiny/chat/ios-input-bar.patch" in active:
+        raise SystemExit("[ERROR] iOS input-bar patch is active; refusing to adapt forbidden-record-button patch.")
+
+    lines = patch.read_text(encoding="utf-8").splitlines(keepends=True)
+    helper_ctx = "         updateAudioVideoSendButtonColor();\n"
+    removed = "-        boolean currentModeVideo = isInVideoMode;\n"
+    header_re = re.compile(r"^@@ -(\d+),(\d+) \+(\d+),(\d+) @@(.*)$")
+
+    def hunk_bounds(index: int) -> int:
+        return next(
+            (
+                i for i in range(index + 1, len(lines))
+                if lines[i].startswith("@@ -") or lines[i].startswith("diff --git ")
+            ),
+            len(lines),
+        )
+
+    hunks = [i for i, l in enumerate(lines) if l.startswith("@@ -")]
+    if len(hunks) != 4:
+        raise SystemExit(f"[ERROR] Expected four hunks in forbidden-record-button patch; found {len(hunks)}.")
+    if "".join(lines).count("ChatActivityEnterView.java") < 1 or sum(l.startswith("diff --git ") for l in lines) != 1:
+        raise SystemExit("[ERROR] Forbidden-record-button patch no longer targets exactly one file.")
+
+    targets = [i for i in hunks if helper_ctx in lines[i + 1:hunk_bounds(i)]]
+    if not targets:
+        if "updateAudioVideoSendButtonColor" in "".join(lines):
+            raise SystemExit("[ERROR] Unexpected updateAudioVideoSendButtonColor reference in forbidden-record-button patch.")
+        print("[OK] Forbidden-record-button patch already adapted for stock source.")
+    else:
+        if len(targets) != 1:
+            raise SystemExit("[ERROR] Expected exactly one hunk with the iOS-only helper context.")
+        start = targets[0]
+        end = hunk_bounds(start)
+        body = lines[start + 1:end]
+        if body[0] != helper_ctx or removed not in body:
+            raise SystemExit("[ERROR] iOS-only helper context is not the leading line of the expected hunk.")
+        m = header_re.match(lines[start].rstrip("\r\n"))
+        if not m:
+            raise SystemExit("[ERROR] Invalid forbidden-record-button hunk header.")
+        old_start, old_len, new_start, new_len, tail = int(m[1]), int(m[2]), int(m[3]), int(m[4]), m[5]
+        lines[start] = f"@@ -{old_start + 1},{old_len - 1} +{new_start + 1},{new_len - 1} @@{tail}\n"
+        del lines[start + 1]
+        patch.write_text("".join(lines), encoding="utf-8")
+        print("[OK] Forbidden-record-button patch re-anchored without iOS input-bar helper context.")
+
+    lines = patch.read_text(encoding="utf-8").splitlines(keepends=True)
+    if "updateAudioVideoSendButtonColor" in "".join(lines):
+        raise SystemExit("[ERROR] iOS-only helper reference remains in forbidden-record-button patch.")
+    for index in [i for i, l in enumerate(lines) if l.startswith("@@ -")]:
+        m = header_re.match(lines[index].rstrip("\r\n"))
+        if not m:
+            raise SystemExit("[ERROR] Invalid forbidden-record-button hunk header after adaptation.")
+        body = lines[index + 1:hunk_bounds(index)]
+        if (
+            sum(x.startswith((" ", "-")) for x in body) != int(m[2])
+            or sum(x.startswith((" ", "+")) for x in body) != int(m[4])
+        ):
+            raise SystemExit("[ERROR] Forbidden-record-button hunk counts are invalid after adaptation.")
+
 def adapt_input_menu_reserve_patch(repo: Path) -> None:
     """Retarget the input-menu reserve hunk to pinned source without translator context."""
     import re
@@ -1888,6 +2030,8 @@ def main() -> int:
     adapt_burn_voice_round_patch(repo)
     adapt_feed_chatactivity_patch(repo)
     adapt_feed_without_ios_input_bar(repo)
+    adapt_slowmode_media_edit_patch(repo)
+    adapt_forbidden_record_button_patch(repo)
     adapt_input_menu_reserve_patch(repo)
     adapt_local_names_patch(repo)
     adapt_system_folders_patch(repo)
