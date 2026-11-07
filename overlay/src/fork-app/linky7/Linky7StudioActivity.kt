@@ -210,7 +210,7 @@ class Linky7StudioActivity : Activity() {
             catch (e: Exception) { toast("Preview error: ${e.message}") }
         }
         previewText = TextView(this).apply {
-            setTextColor(Color.WHITE); textSize = 14f; isTextSelectable = true
+            setTextColor(Color.WHITE); textSize = 14f; setTextIsSelectable(true)
             setPadding(d(12), d(12), d(12), d(12)); setBackgroundColor(Color.rgb(25, 33, 49))
             text = "Formatted rich-post preview appears here."
         }

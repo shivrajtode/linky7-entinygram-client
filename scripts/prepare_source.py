@@ -1149,6 +1149,52 @@ def adapt_forbidden_record_button_patch(repo: Path) -> None:
         ):
             raise SystemExit("[ERROR] Forbidden-record-button hunk counts are invalid after adaptation.")
 
+def adapt_ios_input_helper_for_stock_input_bar(repo: Path) -> None:
+    """Keep IosInputHelper.kt compiling while the iOS input-bar patch is excluded.
+
+    ``IosInputHelper.updateSlowModeContainer`` reads ``ChatActivityEnterView.slowModePillWidth``
+    (Java ``getSlowModePillWidth()``), an accessor that only the deliberately excluded
+    ios-input-bar patch adds. Pluginless builds use the stock fixed margin instead; the
+    ``// #if PLUGINS`` branch keeps the upstream expression for full-featured builds.
+    """
+    helper = repo / "src" / "fork" / "helpers" / "chat" / "IosInputHelper.kt"
+    series = repo / "series"
+    if not helper.is_file() or not series.is_file():
+        raise SystemExit("[ERROR] IosInputHelper source or active series is missing.")
+
+    active = {
+        line.strip().replace("\\", "/")
+        for line in series.read_text(encoding="utf-8").splitlines()
+    }
+    if "entiny/chat/ios-input-bar.patch" in active:
+        print("[OK] iOS input-bar patch is active; IosInputHelper needs no adaptation.")
+        return
+
+    sentinel = "LINKY7_PLUGINLESS_IOS_INPUT_PILL"
+    original = "            val wanted = AndroidUtilities.dp(14f) + enterView.slowModePillWidth\n"
+    adapted = (
+        "            // #if PLUGINS\n"
+        + original
+        + "            // #else\n"
+        + f"            // {sentinel}: the pill-width accessor comes from the excluded iOS input-bar patch\n"
+        + "            val wanted = AndroidUtilities.dp(14f)\n"
+        + "            // #endif\n"
+    )
+    source = helper.read_text(encoding="utf-8")
+    if sentinel in source:
+        if (
+            source.count(sentinel) != 1
+            or adapted not in source
+            or source.count("slowModePillWidth") != 1
+        ):
+            raise SystemExit("[ERROR] IosInputHelper pluginless adapter is malformed.")
+        print("[OK] IosInputHelper already adapted for stock input bar.")
+        return
+    if source.count(original) != 1 or source.count("slowModePillWidth") != 1:
+        raise SystemExit("[ERROR] IosInputHelper slow-mode pill expression changed upstream.")
+    helper.write_text(source.replace(original, adapted), encoding="utf-8")
+    print("[OK] IosInputHelper adapted: slow-mode pill width falls back to the stock margin.")
+
 def adapt_input_menu_reserve_patch(repo: Path) -> None:
     """Retarget the input-menu reserve hunk to pinned source without translator context."""
     import re
@@ -2039,6 +2085,7 @@ def main() -> int:
     adapt_hide_business_bot_banner_patch(repo)
     adapt_excluded_helper_references(repo)
     adapt_pluginless_helper_apis(repo)
+    adapt_ios_input_helper_for_stock_input_bar(repo)
 
     src = builder / "overlay" / "src" / "fork-app" / "linky7"
     if not src.is_dir() or not (src / "Linky7StudioActivity.kt").is_file():
